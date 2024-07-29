@@ -61,15 +61,13 @@ async function connectToDatabase(country) {
  try {
   const data = await s3.getObject(params).promise();
   const dbPath = path.join(__dirname, `${country}.db`);
-  fs.writeFileSync(dbPath, Buffer.from(data));
+  fs.writeFileSync(dbPath, data.body);
   const db = new sqlite3.Database(dbPath);
   return db;
- }catch (error) {
-  console.error('从S3读取数据库出错:', error.message);
-  return null;
-}
-
-  
+  }catch (error) {
+    console.error('从S3读取数据库出错:', error.message);
+    return null;
+  }
 }
 
 // 从S3读取图片并转换为Base64
