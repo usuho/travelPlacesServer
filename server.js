@@ -99,7 +99,13 @@ mongoose.connect('mongodb://localhost:27017/vue-auth', {})
 app.get('/regions/:country', async (req, res) => {
   const country = req.params.country;
   try {
+    console.log(`连接到 ${country} 的数据库...`);
     const db = await connectToDatabase(country);
+    if (!db) {
+      throw new Error('数据库连接失败');
+    }
+    console.log('数据库连接成功。');
+
     db.all('SELECT DISTINCT region FROM attractions', [], (err, rows) => {
       if (err) {
         console.error('查询数据库出错: ' + err.message);
@@ -108,15 +114,18 @@ app.get('/regions/:country', async (req, res) => {
 
       const regions = rows.map(row => row.region);
       res.json(regions);
+
       db.close((err) => {
         if (err) {
-          console.error(err.message);
+          console.error('关闭数据库连接时出错: ' + err.message);
+        } else {
+          console.log('数据库连接已关闭。');
         }
-        console.log('关闭数据库连接.');
       });
     });
   } catch (error) {
-    res.status(500).json({ error: '数据库连接失败' });
+    console.error('发生错误:', error.message);
+    res.status(500).json({ error: error.message });
   }
 });
 
