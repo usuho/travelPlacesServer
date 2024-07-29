@@ -53,18 +53,23 @@ app.use(cors({
 
 // 辅助函数：连接到正确的数据库
 async function connectToDatabase(country) {
+  const s3 = new aws.S3();
   const params = {
     Bucket: 'travelplacesbucket',
     Key: `${country}.db`,
   };
 
- try {
-  const data = await s3.getObject(params).promise();
-  const dbPath = path.join(__dirname, `${country}.db`);
-  fs.writeFileSync(dbPath, data.body);
-  const db = new sqlite3.Database(dbPath);
-  return db;
-  }catch (error) {
+  try {
+    const data = await s3.getObject(params).promise();
+    if (!data.Body) {
+      throw new Error('S3 getObject response does not contain Body');
+    }
+
+    const dbPath = path.join(__dirname, `${country}.db`);
+    fs.writeFileSync(dbPath, data.Body);  // 确保只写入文件内容
+    const db = new sqlite3.Database(dbPath);
+    return db;
+  } catch (error) {
     console.error('从S3读取数据库出错:', error.message);
     return null;
   }
