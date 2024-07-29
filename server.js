@@ -1,3 +1,4 @@
+const os = require('os');
 require('dotenv').config();
 const express = require('express');
 const sqlite3 = require('sqlite3').verbose();
@@ -13,6 +14,29 @@ const path = require('path');
 
 const app = express();
 const PORT = 3000;
+
+function getLocalIPAddress() {
+  const interfaces = os.networkInterfaces();
+  for (let iface in interfaces) {
+    for (let alias of interfaces[iface]) {
+      if (alias.family === 'IPv4' && !alias.internal) {
+        if (alias.address.startsWith('192.168')) {
+          return alias.address;
+        }
+        else {
+          return alias.address;
+        }
+      }
+    }
+  }
+  return '0.0.0.0';
+}
+
+const host = getLocalIPAddress();
+
+app.get('/api/ip', (req, res) => {
+  res.json({ ip: host, port: port });
+});
 
 const s3 = new AWS.S3({
   accessKeyId: process.env.AWS_ACCESS_KEY_ID,
@@ -247,4 +271,4 @@ app.post('/login', async (req, res) => {
   res.status(200).json({ msg: '登录成功' });
 });
 
-app.listen(PORT, () => { console.log(`服务器正在端口 ${PORT} 上运行`); });
+app.listen(PORT, () => { console.log(`服务器正在端口 ${host}:${PORT} 上运行`); });
