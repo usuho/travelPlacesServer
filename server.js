@@ -2,7 +2,7 @@ const os = require('os');
 require('dotenv').config();
 const express = require('express');
 const sqlite3 = require('sqlite3').verbose();
-const mongoose = require('mongoose');
+/*const mongoose = require('mongoose');*/
 const bodyParser = require('body-parser');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
@@ -10,6 +10,7 @@ const User = require('./models/User');
 const AWS = require('aws-sdk');
 const fs = require('fs');
 const path = require('path');
+const sharp = require('sharp');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -34,7 +35,7 @@ function getLocalIPAddress() {
 const host = getLocalIPAddress();
 
 app.get('/api/ip', (req, res) => {
-  res.json({ ip: host, port: port });
+  res.json({ ip: host, port: PORT });
 });
 
 const s3 = new AWS.S3({
@@ -53,31 +54,26 @@ app.use(cors({
 
 // 辅助函数：连接到正确的数据库
 async function connectToDatabase(country) {
-  const s3 = new aws.S3();
   const params = {
     Bucket: 'travelplacesbucket',
     Key: `${country}.db`,
   };
 
   try {
-    console.log(`尝试从 S3 获取数据库对象: ${params.Key}`);
     const data = await s3.getObject(params).promise();
     if (!data.Body) {
       throw new Error('S3 getObject response does not contain Body');
     }
-    console.log('S3 获取成功，准备写入文件系统...');
 
     const dbPath = path.join(__dirname, `${country}.db`);
-    fs.writeFileSync(dbPath, data.Body);
-    console.log(`写入文件系统成功，准备连接数据库: ${dbPath}`);
+    fs.writeFileSync(dbPath, data.Body);  // 确保只写入文件内容
     const db = new sqlite3.Database(dbPath);
     return db;
   } catch (error) {
-    console.error('从 S3 读取数据库出错:', error.message);
+    console.error('从S3读取数据库出错:', error.message);
     return null;
   }
 }
-
 
 // 从S3读取图片并转换为Base64
 async function getImageFromS3(imageKey) {
@@ -88,7 +84,33 @@ async function getImageFromS3(imageKey) {
 
   try {
     const data = await s3.getObject(params).promise();
-    return data.Body.toString('base64');
+
+    const compressedBuffer = await sharp(data.Body)
+    .jpeg({ quality: 100 }) // 压缩图像
+    .toBuffer();
+
+    return compressedBuffer.toString('base64');
+  } catch (error) {
+    console.error('从S3读取图片出错:', error.message);
+    return null;
+  }
+}
+
+// 从S3读取图片并转换为Base64并压缩
+async function getSmallImageFromS3(imageKey) {
+  const params = {
+    Bucket: 'travelplacesbucket',
+    Key: imageKey
+  };
+
+  try {
+    const data = await s3.getObject(params).promise();
+
+    const compressedBuffer = await sharp(data.Body) // 调整图像大小
+    .jpeg({ quality: 80 }) // 压缩图像
+    .toBuffer();
+
+    return compressedBuffer.toString('base64');
   } catch (error) {
     console.error('从S3读取图片出错:', error.message);
     return null;
@@ -96,9 +118,9 @@ async function getImageFromS3(imageKey) {
 }
 
 // 连接到MongoDB
-mongoose.connect('mongodb://localhost:27017/vue-auth', {})
+/*mongoose.connect('mongodb://localhost:27017/vue-auth', {})
   .then(() => console.log('MongoDB 连接成功'))
-  .catch(err => console.log(err));
+  .catch(err => console.log(err));*/
 
 // 获取所有景点的region
 app.get('/regions/:country', async (req, res) => {
@@ -190,7 +212,7 @@ app.get('/attractions/:country', async (req, res) => {
           if (row.image1) {
             const imageKey = `${country}-${row.id}-image1.png`;
             console.log(imageKey);
-            row.image1 = await getImageFromS3(imageKey);
+            row.image1 = await getSmallImageFromS3(imageKey);
           }
         }
 
@@ -254,7 +276,7 @@ app.get('/attraction/:country/:id', async (req, res) => {
 });
 
 // 用户注册路由
-app.post('/register', async (req, res) => {
+/*app.post('/register', async (req, res) => {
   const { username, password } = req.body;
 
   const existingUser = await User.findOne({ username });
@@ -285,6 +307,6 @@ app.post('/login', async (req, res) => {
   }
 
   res.status(200).json({ msg: '登录成功' });
-});
+});*/
 
 app.listen(PORT, () => { console.log(`服务器正在端口 ${host}:${PORT} 上运行`); });

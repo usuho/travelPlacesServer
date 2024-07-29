@@ -1,0 +1,101 @@
+[33mcommit b6072210062d6481299774c91af291a738d360f2[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m, [m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m
+Author: Frex Yang <xiang2g@hotmail.com>
+Date:   Mon Jul 29 21:16:23 2024 +0800
+
+    cb1.1
+
+[33mcommit ee3a1a874683b35dc1947f155d87cc8b7f7ecf02[m
+Author: Frex Yang <xiang2g@hotmail.com>
+Date:   Mon Jul 29 21:15:30 2024 +0800
+
+    cb1
+
+[33mcommit 5e13527e06967fd83a34c45396461da8d92ce2cc[m
+Author: Frex Yang <xiang2g@hotmail.com>
+Date:   Mon Jul 29 21:02:11 2024 +0800
+
+    cb
+
+[33mcommit 7ba4d749eaa96e69274d2762772b25da8d44daa4[m
+Author: Frex Yang <xiang2g@hotmail.com>
+Date:   Mon Jul 29 20:38:05 2024 +0800
+
+    debug4
+
+[33mcommit 3f83ba96373775e78b06f210e619fd57cbe80c80[m
+Author: Frex Yang <xiang2g@hotmail.com>
+Date:   Mon Jul 29 20:36:35 2024 +0800
+
+    debug3
+
+[33mcommit 9f55389e1b0d1c3208dd7f1d1bcd6647f53c92ad[m
+Author: Frex Yang <xiang2g@hotmail.com>
+Date:   Mon Jul 29 20:33:35 2024 +0800
+
+    debug2
+
+[33mcommit 47bea99d412f0e95ef51e6f56d8c6cc4a7d2942f[m
+Author: Frex Yang <xiang2g@hotmail.com>
+Date:   Mon Jul 29 20:29:02 2024 +0800
+
+    debug
+
+[33mcommit f67325e5130cde5bf6398346bc03b45652e0f3da[m
+Author: Frex Yang <xiang2g@hotmail.com>
+Date:   Mon Jul 29 20:18:46 2024 +0800
+
+    fix6
+
+[33mcommit 549ea61a7a980fc662f73c6cb7a231a757f7fa39[m
+Author: Frex Yang <xiang2g@hotmail.com>
+Date:   Mon Jul 29 20:16:08 2024 +0800
+
+    fix5
+
+[33mcommit 1cde3a40debfb1298fcd6c83295d7d77f35c5976[m
+Author: Frex Yang <xiang2g@hotmail.com>
+Date:   Mon Jul 29 20:13:11 2024 +0800
+
+    fix4
+
+[33mcommit 677ef0bca7c80a923edcef1c31208641bc2bfd17[m
+Author: Frex Yang <xiang2g@hotmail.com>
+Date:   Mon Jul 29 20:07:47 2024 +0800
+
+    fix3
+
+[33mcommit 4935a114b182d5eef0a23c6e699ad24288971ab6[m
+Author: Frex Yang <xiang2g@hotmail.com>
+Date:   Mon Jul 29 19:57:14 2024 +0800
+
+    fix2
+
+[33mcommit a3d84d29763ab8ed903f1981ee76ee7fa23146ed[m
+Author: Frex Yang <xiang2g@hotmail.com>
+Date:   Mon Jul 29 19:48:21 2024 +0800
+
+    fix
+
+[33mcommit 30bbca6360dd698ffc8fccb802fce3dfa97fd34c[m
+Author: Frex Yang <xiang2g@hotmail.com>
+Date:   Mon Jul 29 19:43:45 2024 +0800
+
+    nologin
+
+[33mcommit dcb6d13c0d732f71172d2a05ef1cb6854006f908[m
+Author: Frex Yang <xiang2g@hotmail.com>
+Date:   Mon Jul 29 14:01:01 2024 +0800
+
+    ip
+
+[33mcommit 87c2dafdc8bbb9afad55da004e6e9613282e1e66[m
+Author: Frex Yang <xiang2g@hotmail.com>
+Date:   Mon Jul 29 13:41:51 2024 +0800
+
+    Remove .env file and add it to .gitignore
+
+[33mcommit 46e1bedb1029bccfb93e94af0ae22ae69198cdcd[m
+Author: Frex Yang <xiang2g@hotmail.com>
+Date:   Mon Jul 29 13:30:18 2024 +0800
+
+    Initial commit
