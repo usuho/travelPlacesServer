@@ -8,7 +8,6 @@ const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const User = require('./models/User');
 const AWS = require('aws-sdk');
-const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 
@@ -54,22 +53,23 @@ app.use(cors({
 
 // 辅助函数：连接到正确的数据库
 async function connectToDatabase(country) {
-  const url = s3.getSignedUrl('getObject', {
+  const params = {
     Bucket: 'travelplacesbucket',
     Key: `${country}.db`,
-    Expires: 60 * 5
-  });
+  };
 
-  console.log('Url是', url);
-
-  const response = await axios.get(url, { responseType: 'arraybuffer' });
+ try {
+  const data = await s3.getObject(params).promise();
   const dbPath = path.join(__dirname, `${country}.db`);
-
-  fs.writeFileSync(dbPath, Buffer.from(response.data));
-
+  fs.writeFileSync(dbPath, Buffer.from(data));
   const db = new sqlite3.Database(dbPath);
-
   return db;
+ }catch (error) {
+  console.error('从S3读取数据库出错:', error.message);
+  return null;
+}
+
+  
 }
 
 // 从S3读取图片并转换为Base64
