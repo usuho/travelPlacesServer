@@ -96,7 +96,7 @@ mongoose.connect('mongodb://localhost:27017/vue-auth', {})
   .catch(err => console.log(err));
 
 // 获取所有景点的region
-app.get('/regions/:country', async (req, res) => {
+app.get('/regions/japan', async (req, res) => {
   const country = req.params.country;
   try {
     console.log(`连接到 ${country} 的数据库...`);
