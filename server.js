@@ -190,8 +190,6 @@ app.get('/attractions/:country', async (req, res) => {
           }
         }
 
-        console.log('从数据库中获取的行:', rows);
-
         res.json({
           total: countRow.total,
           data: rows
