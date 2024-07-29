@@ -10,7 +10,6 @@ const User = require('./models/User');
 const AWS = require('aws-sdk');
 const fs = require('fs');
 const path = require('path');
-const sharp = require('sharp');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -84,38 +83,13 @@ async function getImageFromS3(imageKey) {
 
   try {
     const data = await s3.getObject(params).promise();
-
-    const compressedBuffer = await sharp(data.Body)
-    .jpeg({ quality: 100 }) // 压缩图像
-    .toBuffer();
-
-    return compressedBuffer.toString('base64');
+    return data.Body.toString('base64');
   } catch (error) {
     console.error('从S3读取图片出错:', error.message);
     return null;
   }
 }
 
-// 从S3读取图片并转换为Base64并压缩
-async function getSmallImageFromS3(imageKey) {
-  const params = {
-    Bucket: 'travelplacesbucket',
-    Key: imageKey
-  };
-
-  try {
-    const data = await s3.getObject(params).promise();
-
-    const compressedBuffer = await sharp(data.Body) // 调整图像大小
-    .jpeg({ quality: 80 }) // 压缩图像
-    .toBuffer();
-
-    return compressedBuffer.toString('base64');
-  } catch (error) {
-    console.error('从S3读取图片出错:', error.message);
-    return null;
-  }
-}
 
 // 连接到MongoDB
 /*mongoose.connect('mongodb://localhost:27017/vue-auth', {})
@@ -212,7 +186,7 @@ app.get('/attractions/:country', async (req, res) => {
           if (row.image1) {
             const imageKey = `${country}-${row.id}-image1.png`;
             console.log(imageKey);
-            row.image1 = await getSmallImageFromS3(imageKey);
+            row.image1 = await getImageFromS3(imageKey);
           }
         }
 
