@@ -75,7 +75,7 @@ async function connectToDatabase(country) {
 // 从S3读取图片并转换为Base64
 async function getImageFromS3(imageKey) {
   const params = {
-    Bucket: 'travelplacesbucket1',
+    Bucket: 'travelplacesbucket',
     Key: imageKey
   };
 
