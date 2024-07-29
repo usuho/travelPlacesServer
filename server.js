@@ -55,7 +55,7 @@ app.use(cors({
 // 辅助函数：连接到正确的数据库
 async function connectToDatabase(country) {
   const url = s3.getSignedUrl('getObject', {
-    Bucket: 'travelplacesbucket1',
+    Bucket: 'travelplacesbucket',
     Key: `${country}.db`,
     Expires: 60 * 5
   });
