@@ -53,26 +53,31 @@ app.use(cors({
 
 // 辅助函数：连接到正确的数据库
 async function connectToDatabase(country) {
+  const s3 = new aws.S3();
   const params = {
     Bucket: 'travelplacesbucket',
     Key: `${country}.db`,
   };
 
   try {
+    console.log(`尝试从 S3 获取数据库对象: ${params.Key}`);
     const data = await s3.getObject(params).promise();
     if (!data.Body) {
       throw new Error('S3 getObject response does not contain Body');
     }
+    console.log('S3 获取成功，准备写入文件系统...');
 
     const dbPath = path.join(__dirname, `${country}.db`);
-    fs.writeFileSync(dbPath, data.Body);  // 确保只写入文件内容
+    fs.writeFileSync(dbPath, data.Body);
+    console.log(`写入文件系统成功，准备连接数据库: ${dbPath}`);
     const db = new sqlite3.Database(dbPath);
     return db;
   } catch (error) {
-    console.error('从S3读取数据库出错:', error.message);
+    console.error('从 S3 读取数据库出错:', error.message);
     return null;
   }
 }
+
 
 // 从S3读取图片并转换为Base64
 async function getImageFromS3(imageKey) {
@@ -96,7 +101,7 @@ mongoose.connect('mongodb://localhost:27017/vue-auth', {})
   .catch(err => console.log(err));
 
 // 获取所有景点的region
-app.get('/regions/japan', async (req, res) => {
+app.get('/regions/:country', async (req, res) => {
   const country = req.params.country;
   try {
     console.log(`连接到 ${country} 的数据库...`);
