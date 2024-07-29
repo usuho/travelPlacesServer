@@ -53,7 +53,6 @@ app.use(cors({
 
 // 辅助函数：连接到正确的数据库
 async function connectToDatabase(country) {
-  const s3 = new aws.S3();
   const params = {
     Bucket: 'travelplacesbucket',
     Key: `${country}.db`,
