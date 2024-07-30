@@ -135,6 +135,41 @@ app.get('/regions/:country', async (req, res) => {
   }
 });
 
+//选择county内有的region
+app.get('/regions/:country/:county', async (req, res) => {
+  const country = req.params.country;
+  const county = req.params.county;
+  try {
+    console.log(`连接到 ${country} 的数据库...`);
+    const db = await connectToDatabase(country);
+    if (!db) {
+      throw new Error('数据库连接失败');
+    }
+    console.log('数据库连接成功。');
+
+    db.all('SELECT DISTINCT region FROM attractions WHERE county = ?', county, (err, rows) => {
+      if (err) {
+        console.error('查询数据库出错: ' + err.message);
+        return res.status(500).json({ error: err.message });
+      }
+
+      const regions = rows.map(row => row.region);
+      res.json(regions);
+
+      db.close((err) => {
+        if (err) {
+          console.error('关闭数据库连接时出错: ' + err.message);
+        } else {
+          console.log('数据库连接已关闭。');
+        }
+      });
+    });
+  } catch (error) {
+    console.error('发生错误:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // 获取所有景点的county
 app.get('/countis/:country', async (req, res) => {
   const country = req.params.country;
