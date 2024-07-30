@@ -182,13 +182,13 @@ app.get('/attractions/:country', async (req, res) => {
           return res.status(500).json({ error: err.message });
         }
 
-        for (const row of rows) {
+        await Promise.all(rows.map(async (row) => {
           if (row.image1) {
             const imageKey = `${country}-${row.id}-image1.png`;
             console.log(imageKey);
             row.image1 = await getImageFromS3(imageKey);
           }
-        }
+        }));
 
         res.json({
           total: countRow.total,
