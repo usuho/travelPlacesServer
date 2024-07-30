@@ -217,9 +217,9 @@ app.get('/attractions/:country', async (req, res) => {
 
   let orderByClause;
   if (order === 'rating_asc') {
-    orderByClause = 'rating ASC';
+    orderByClause = 'CASE WHEN rating = 100 THEN 1 ELSE 0 END DESC, rating ASC';
   } else if (order === 'rating_desc') {
-    orderByClause = 'rating DESC';
+    orderByClause = 'CASE WHEN rating = 100 THEN 1 ELSE 0 END DESC, rating DESC';
   } else if (order === 'reviews_asc') {
     orderByClause = 'total_reviews ASC';
   } else if (order === 'reviews_desc') {
