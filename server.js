@@ -37,6 +37,11 @@ app.get('/api/ip', (req, res) => {
   res.json({ ip: host, port: PORT });
 });
 
+app.use((req, res, next) => {
+  res.setHeader('Cache-Control', 'public, max-age=315360000'); // 缓存 10 年
+  next();
+});
+
 const s3 = new AWS.S3({
   accessKeyId: process.env.AWS_ACCESS_KEY_ID,
   secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
