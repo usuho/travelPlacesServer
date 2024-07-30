@@ -135,6 +135,40 @@ app.get('/regions/:country', async (req, res) => {
   }
 });
 
+// 获取所有景点的county
+app.get('/countis/:country', async (req, res) => {
+  const country = req.params.country;
+  try {
+    console.log(`连接到 ${country} 的数据库...`);
+    const db = await connectToDatabase(country);
+    if (!db) {
+      throw new Error('数据库连接失败');
+    }
+    console.log('数据库连接成功。');
+
+    db.all('SELECT DISTINCT county FROM attractions', [], (err, rows) => {
+      if (err) {
+        console.error('查询数据库出错: ' + err.message);
+        return res.status(500).json({ error: err.message });
+      }
+
+      const countis = rows.map(row => row.county);
+      res.json(countis);
+
+      db.close((err) => {
+        if (err) {
+          console.error('关闭数据库连接时出错: ' + err.message);
+        } else {
+          console.log('数据库连接已关闭。');
+        }
+      });
+    });
+  } catch (error) {
+    console.error('发生错误:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // 获取国家的景点（包含图片1）
 app.get('/attractions/:country', async (req, res) => {
   const country = req.params.country;
@@ -144,6 +178,7 @@ app.get('/attractions/:country', async (req, res) => {
   const limit = parseInt(req.query.limit, 10) || 20;
   const offset = (page - 1) * limit;
   const region = req.query.region || '';
+  const county = req.query.county || '';
 
   let orderByClause;
   if (order === 'rating_asc') {
@@ -160,7 +195,7 @@ app.get('/attractions/:country', async (req, res) => {
     const db = await connectToDatabase(country);
 
     let countQuery = `SELECT COUNT(*) as total FROM attractions WHERE total_reviews >= ?`;
-    let dataQuery = `SELECT id, name, image1, region, total_reviews, rating FROM attractions WHERE total_reviews >= ?`;
+    let dataQuery = `SELECT id, name, image1, region, county, total_reviews, rating FROM attractions WHERE total_reviews >= ?`;
 
     const queryParamsCount = [minReviews];
     const queryParamsData = [minReviews];
@@ -170,6 +205,13 @@ app.get('/attractions/:country', async (req, res) => {
       dataQuery += ' AND region = ? ';
       queryParamsCount.push(region);
       queryParamsData.push(region);
+    }
+
+    if (county) {
+      countQuery += ' AND county = ? ';
+      dataQuery += ' AND county = ? ';
+      queryParamsCount.push(county);
+      queryParamsData.push(county);
     }
 
     dataQuery += ` ORDER BY ${orderByClause} LIMIT ? OFFSET ? `;
@@ -218,7 +260,7 @@ app.get('/attraction/:country/:id', async (req, res) => {
   const id = req.params.id;
   try {
     const db = await connectToDatabase(country);
-    db.get('SELECT id, image1, image2, image3, name, region, overview, duration, details, position, total_reviews, rating, positive_reviews, website FROM attractions WHERE id = ?', [id], async (err, row) => {
+    db.get('SELECT id, image1, image2, image3, name, region, county, overview, duration, details, position, total_reviews, rating, positive_reviews, website FROM attractions WHERE id = ?', [id], async (err, row) => {
       if (err) {
         console.error('查询数据库出错: ' + err.message);
         return res.status(500).json({ error: err.message });
