@@ -224,13 +224,17 @@ app.get('/attractions/:country', async (req, res) => {
     orderByClause = 'total_reviews ASC';
   } else if (order === 'reviews_desc') {
     orderByClause = 'total_reviews DESC';
+  } else if (order === 'positive_asc') {
+    orderByClause = 'positive_reviews ASC';
+  } else if (order === 'positive_desc') {
+    orderByClause = 'positive_reviews DESC';
   }
 
   try {
     const db = await connectToDatabase(country);
 
     let countQuery = `SELECT COUNT(*) as total FROM attractions WHERE total_reviews >= ?`;
-    let dataQuery = `SELECT id, name, image1, region, county, total_reviews, rating FROM attractions WHERE total_reviews >= ?`;
+    let dataQuery = `SELECT id, name, image1, region, county, total_reviews, rating ,positive_reviews FROM attractions WHERE total_reviews >= ?`;
 
     const queryParamsCount = [minReviews];
     const queryParamsData = [minReviews];
