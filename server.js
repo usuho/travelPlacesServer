@@ -59,7 +59,7 @@ app.use(cors({
 // 辅助函数：连接到正确的数据库
 async function connectToDatabase(country) {
   const params = {
-    Bucket: 'travelplacesbucket',
+    Bucket: 'travelplacesbucketjapan',
     Key: `${country}.db`,
   };
 
@@ -82,7 +82,7 @@ async function connectToDatabase(country) {
 // 从S3读取图片并转换为Base64
 async function getImageFromS3(imageKey) {
   const params = {
-    Bucket: 'travelplacesbucket',
+    Bucket: 'travelplacesbucketjapan',
     Key: imageKey
   };
 
