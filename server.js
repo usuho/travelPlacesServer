@@ -102,7 +102,7 @@ async function getImageFromS3(imageKey) {
   .catch(err => console.log(err));*/
 
 // 获取所有景点的region
-app.get('/regions/:country', async (req, res) => {
+app.get('/api/regions/:country', async (req, res) => {
   const country = req.params.country;
   try {
     console.log(`连接到 ${country} 的数据库...`);
@@ -136,7 +136,7 @@ app.get('/regions/:country', async (req, res) => {
 });
 
 //选择county内有的region
-app.get('/regions/:country/:county', async (req, res) => {
+app.get('/api/regions/:country/:county', async (req, res) => {
   const country = req.params.country;
   const county = req.params.county;
   try {
@@ -171,7 +171,7 @@ app.get('/regions/:country/:county', async (req, res) => {
 });
 
 // 获取所有景点的county
-app.get('/countis/:country', async (req, res) => {
+app.get('/api/countis/:country', async (req, res) => {
   const country = req.params.country;
   try {
     console.log(`连接到 ${country} 的数据库...`);
@@ -205,7 +205,7 @@ app.get('/countis/:country', async (req, res) => {
 });
 
 // 获取国家的景点（包含图片1）
-app.get('/attractions/:country', async (req, res) => {
+app.get('/api/attractions/:country', async (req, res) => {
   const country = req.params.country;
   const minReviews = parseInt(req.query.minReviews) || 0;
   const order = req.query.order || 'rating_desc';
@@ -294,7 +294,7 @@ app.get('/attractions/:country', async (req, res) => {
 });
 
 // 获取景点详情（包含图片）
-app.get('/attraction/:country/:id', async (req, res) => {
+app.get('/api/attraction/:country/:id', async (req, res) => {
   const country = req.params.country;
   const id = req.params.id;
   try {
