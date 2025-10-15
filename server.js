@@ -217,9 +217,17 @@ app.get('/api/attractions/:country', async (req, res) => {
 
   let orderByClause;
   if (order === 'rating_asc') {
-    orderByClause = "CASE WHEN rating = '100%' THEN 1 ELSE 0 END DESC, CAST(REPLACE(rating, '%', '') AS REAL) ASC";
+    orderByClause = `
+    CASE WHEN rating = '100%' THEN 1 ELSE 0 END DESC,
+    CAST(REPLACE(rating, '%', '') AS REAL) ASC,
+    total_reviews ASC
+  `;
   } else if (order === 'rating_desc') {
-    orderByClause = "CASE WHEN rating = '100%' THEN 1 ELSE 0 END DESC, CAST(REPLACE(rating, '%', '') AS REAL) DESC";
+    orderByClause =  `
+    CASE WHEN rating = '100%' THEN 1 ELSE 0 END DESC,
+    CAST(REPLACE(rating, '%', '') AS REAL) DESC,
+    total_reviews DESC
+  `;
   } else if (order === 'reviews_asc') {
     orderByClause = 'total_reviews ASC';
   } else if (order === 'reviews_desc') {
