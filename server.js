@@ -241,8 +241,8 @@ app.get('/api/attractions/:country', async (req, res) => {
   try {
     const db = await connectToDatabase(country);
 
-    let countQuery = `SELECT COUNT(*) as total FROM attractions WHERE total_reviews >= ?`;
-    let dataQuery = `SELECT id, name, image1, region, county, total_reviews, rating ,positive_reviews FROM attractions WHERE total_reviews >= ?`;
+    let countQuery = `SELECT COUNT(DISTINCT name || '-' || region) as total FROM attractions WHERE total_reviews >= ?`;
+    let dataQuery = `SELECT DISTINCT name, region, MIN(id) as id, image1, county, total_reviews, rating, positive_reviews FROM attractions WHERE total_reviews >= ?`;
 
     const queryParamsCount = [minReviews];
     const queryParamsData = [minReviews];
@@ -261,7 +261,7 @@ app.get('/api/attractions/:country', async (req, res) => {
       queryParamsData.push(county);
     }
 
-    dataQuery += ` ORDER BY ${orderByClause} LIMIT ? OFFSET ? `;
+    dataQuery += ` GROUP BY name, region ORDER BY ${orderByClause} LIMIT ? OFFSET ? `;
     queryParamsData.push(limit, offset);
 
     db.get(countQuery, queryParamsCount, (err, countRow) => {
