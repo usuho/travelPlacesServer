@@ -204,6 +204,82 @@ app.get('/api/countis/:country', async (req, res) => {
   }
 });
 
+// ✅ 获取指定国家所有景点的名称和id（用于搜索）
+app.get('/api/attractions-names/:country', async (req, res) => {
+  const country = req.params.country;
+  try {
+    const db = await connectToDatabase(country);
+    if (!db) {
+      throw new Error('数据库连接失败');
+    }
+
+    db.all('SELECT DISTINCT name, MIN(id) as id FROM attractions GROUP BY name ORDER BY name COLLATE NOCASE ASC', [], (err, rows) => {
+      if (err) {
+        console.error('查询数据库出错:', err.message);
+        return res.status(500).json({ error: err.message });
+      }
+
+      res.json(rows);
+      db.close((err) => {
+        if (err) {
+          console.error('关闭数据库连接出错:', err.message);
+        } else {
+          console.log('数据库连接已关闭。');
+        }
+      });
+    });
+  } catch (error) {
+    console.error('发生错误:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 获取指定国家已过滤的景点名称和ID（支持 region 和 county）
+app.get('/api/attractions-names-filtered/:country', async (req, res) => {
+  const country = req.params.country;
+  const region = req.query.region || '';
+  const county = req.query.county || '';
+
+  try {
+    const db = await connectToDatabase(country);
+
+    // 构建查询，只返回景点名称和相关标识
+    let query = `SELECT DISTINCT name, region, MIN(id) as id FROM attractions WHERE 1=1`;
+    const queryParams = [];
+
+    if (county) {
+      query += ' AND county = ?';
+      queryParams.push(county);
+    }
+
+    if (region) {
+      query += ' AND region = ?';
+      queryParams.push(region);
+    }
+
+    // 确保GROUP BY包含所有非聚合字段
+    query += ' GROUP BY name, region ORDER BY name COLLATE NOCASE ASC';
+
+    db.all(query, queryParams, (err, rows) => {
+      if (err) {
+        console.error('查询数据库出错: ' + err.message);
+        return res.status(500).json({ error: err.message });
+      }
+
+      res.json(rows);
+      db.close((err) => {
+        if (err) console.error(err.message);
+      });
+    });
+  } catch (error) {
+    res.status(500).json({ error: '数据库连接失败' });
+  }
+});
+
+
+
+
+
 // 获取国家的景点（不包含图片）
 app.get('/api/attractions/:country', async (req, res) => {
   const country = req.params.country;
