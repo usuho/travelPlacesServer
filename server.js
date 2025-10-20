@@ -204,7 +204,7 @@ app.get('/api/countis/:country', async (req, res) => {
   }
 });
 
-// 获取国家的景点（包含图片1）
+// 获取国家的景点（不包含图片）
 app.get('/api/attractions/:country', async (req, res) => {
   const country = req.params.country;
   const minReviews = parseInt(req.query.minReviews) || 0;
@@ -276,13 +276,12 @@ app.get('/api/attractions/:country', async (req, res) => {
           return res.status(500).json({ error: err.message });
         }
 
-        await Promise.all(rows.map(async (row) => {
-          if (row.image1) {
-            const imageKey = `${country}-${row.id}-image1.png`;
-            console.log(imageKey);
-            row.image1 = await getImageFromS3(imageKey);
-          }
-        }));
+        rows.forEach((row) => {
+          // 改为只返回图片索引或标志
+          row.hasImage = !!row.image1;
+          delete row.image1; // 不返回 base64 图片
+        });
+
 
         res.json({
           total: countRow.total,
@@ -301,6 +300,26 @@ app.get('/api/attractions/:country', async (req, res) => {
   }
 });
 
+// 获取单张景点图片（按编号）
+app.get('/api/attraction-image/:country/:id/:index', async (req, res) => {
+  const { country, id, index } = req.params;
+  const imageKey = `${country}-${id}-image${index}.png`;
+
+  try {
+    const params = {
+      Bucket: 'travelplacesbucketjapan',
+      Key: imageKey,
+    };
+    const data = await s3.getObject(params).promise();
+    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Cache-Control', 'public, max-age=315360000'); // 长期缓存
+    res.send(data.Body);
+  } catch (error) {
+    console.error(`读取图片 ${imageKey} 出错:`, error.message);
+    res.status(404).json({ error: 'Image not found' });
+  }
+});
+
 // 获取景点详情（包含图片）
 app.get('/api/attraction/:country/:id', async (req, res) => {
   const country = req.params.country;
@@ -314,17 +333,19 @@ app.get('/api/attraction/:country/:id', async (req, res) => {
       }
 
       if (row.image1) {
-        const imageKey1 = `${country}-${row.id}-image1.png`;
-        row.image1 = await getImageFromS3(imageKey1);
+        row.hasImage1 = !!row.image1;
       }
+      else row.hasImage1 = false;
+
       if (row.image2) {
-        const imageKey2 = `${country}-${row.id}-image2.png`;
-        row.image2 = await getImageFromS3(imageKey2);
+        row.hasImage2 = !!row.image2;
       }
+      else row.hasImage2 = false;
+
       if (row.image3) {
-        const imageKey3 = `${country}-${row.id}-image3.png`;
-        row.image3 = await getImageFromS3(imageKey3);
+        row.hasImage3 = !!row.image3;
       }
+      else row.hasImage3 = false;
 
       console.log('从数据库中获取的行:', row);
 
