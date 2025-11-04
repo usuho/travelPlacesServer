@@ -79,6 +79,21 @@ async function connectToDatabase(country) {
   }
 }
 
+// 工具：读取某表的列集合（小写）
+function getTableColumns(db, tableName) {
+  return new Promise((resolve) => {
+    try {
+      db.all(`PRAGMA table_info(${tableName})`, [], (err, rows) => {
+        if (err || !Array.isArray(rows)) return resolve(new Set());
+        const set = new Set(rows.map(r => String(r.name || '').toLowerCase()));
+        resolve(set);
+      });
+    } catch (_) {
+      resolve(new Set());
+    }
+  });
+}
+
 // 从S3读取图片并转换为Base64
 async function getImageFromS3(imageKey) {
   const params = {
@@ -276,6 +291,65 @@ app.get('/api/attractions-names-filtered/:country', async (req, res) => {
   }
 });
 
+// 获取指定国家全部景点的原始位置信息（用于地图）
+app.get('/api/attractions-positions/:country', async (req, res) => {
+  const country = req.params.country;
+  try {
+  const db = await connectToDatabase(country);
+  if (!db) throw new Error('数据库连接失败');
+  const sql = 'SELECT id, name, region, county, rating, positive_reviews, position, image1 FROM attractions';
+  db.all(sql, [], (err, rows) => {
+    if (err) return res.status(500).json({ error: err.message });
+    const data = rows.map(r => ({
+      id: r.id,
+      name: r.name,
+      region: r.region,
+      county: r.county,
+      rating: r.rating,
+      positive_reviews: r.positive_reviews,
+      position: r.position,
+      hasImage: !!r.image1,
+    }));
+    res.json(data);
+    db.close();
+  });
+  } catch (error) {
+  res.status(500).json({ error: error.message });
+  }
+  });
+
+  // 批量按 id 获取位置信息（收藏优化）
+  app.post('/api/attractions-positions/:country/by-ids', async (req, res) => {
+  const country = req.params.country;
+  const ids = Array.isArray(req.body.ids) ? req.body.ids : [];
+  if (!ids.length) return res.json([]);
+
+  try {
+  const db = await connectToDatabase(country);
+  if (!db) throw new Error('数据库连接失败');
+  const placeholders = ids.map(() => '?').join(',');
+  const sql = `SELECT id, name, region, county, rating, positive_reviews, position, image1
+              FROM attractions WHERE id IN (${placeholders})`;
+  db.all(sql, ids, (err, rows) => {
+    if (err) return res.status(500).json({ error: err.message });
+    const data = rows.map(r => ({
+      id: r.id,
+      name: r.name,
+      region: r.region,
+      county: r.county,
+      rating: r.rating,
+      positive_reviews: r.positive_reviews,
+      position: r.position,
+      hasImage: !!r.image1,
+    }));
+    res.json(data);
+    db.close();
+  });
+  } catch (error) {
+  res.status(500).json({ error: error.message });
+  }
+  });
+
 
 
 
@@ -402,7 +476,14 @@ app.get('/api/attraction/:country/:id', async (req, res) => {
   const id = req.params.id;
   try {
     const db = await connectToDatabase(country);
-    db.get('SELECT id, image1, image2, image3, name, region, county, overview, duration, details, position, total_reviews, rating, positive_reviews, website FROM attractions WHERE id = ?', [id], async (err, row) => {
+    // 兼容旧库：如果没有 lat/lng 列，则不在 SELECT 中包含
+    const cols = await getTableColumns(db, 'attractions');
+    const hasLatLng = cols.has('lat') && cols.has('lng');
+    const baseFields = 'id, image1, image2, image3, name, region, county, overview, duration, details, position';
+    const extra = hasLatLng ? ', lat, lng' : '';
+    const tail = ', total_reviews, rating, positive_reviews, website';
+    const sql = `SELECT ${baseFields}${extra}${tail} FROM attractions WHERE id = ?`;
+    db.get(sql, [id], async (err, row) => {
       if (err) {
         console.error('查询数据库出错: ' + err.message);
         return res.status(500).json({ error: err.message });
@@ -423,6 +504,11 @@ app.get('/api/attraction/:country/:id', async (req, res) => {
       }
       else row.hasImage3 = false;
 
+      if (!hasLatLng) {
+        // 旧库没有坐标列，确保返回字段存在但为 null，避免前端断言失败
+        row.lat = null;
+        row.lng = null;
+      }
       console.log('从数据库中获取的行:', row);
 
       res.json(row);
@@ -435,6 +521,86 @@ app.get('/api/attraction/:country/:id', async (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ error: '数据库连接失败' });
+  }
+});
+
+// 返回带经纬度的景点列表（仅返回有坐标的数据）
+app.get('/api/attractions-geo/:country', async (req, res) => {
+  const country = req.params.country;
+  try {
+    const db = await connectToDatabase(country);
+    if (!db) throw new Error('数据库连接失败');
+    const cols = await getTableColumns(db, 'attractions');
+    const hasLatLng = cols.has('lat') && cols.has('lng');
+    if (!hasLatLng) { db.close(); return res.json([]); }
+    const sql = `
+      SELECT id, name, region, county, rating, positive_reviews, total_reviews,
+             lat, lng, image1
+      FROM attractions
+      WHERE lat IS NOT NULL AND lng IS NOT NULL
+    `;
+    db.all(sql, [], (err, rows) => {
+      if (err) return res.status(500).json({ error: err.message });
+      const data = rows.map(r => ({
+        id: r.id,
+        name: r.name,
+        region: r.region,
+        county: r.county,
+        rating: r.rating,
+        positive_reviews: r.positive_reviews,
+        total_reviews: r.total_reviews,
+        lat: typeof r.lat === 'string' ? parseFloat(r.lat) : r.lat,
+        lng: typeof r.lng === 'string' ? parseFloat(r.lng) : r.lng,
+        hasImage: !!r.image1,
+        country,
+      }));
+      res.json(data);
+      db.close();
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 批量按 id 返回经纬度（用于收藏/批量渲染）
+app.post('/api/attractions-geo/:country/by-ids', async (req, res) => {
+  const country = req.params.country;
+  const ids = Array.isArray(req.body.ids) ? req.body.ids : [];
+  if (!ids.length) return res.json([]);
+
+  try {
+    const db = await connectToDatabase(country);
+    if (!db) throw new Error('数据库连接失败');
+    const cols = await getTableColumns(db, 'attractions');
+    const hasLatLng = cols.has('lat') && cols.has('lng');
+    if (!hasLatLng) { db.close(); return res.json([]); }
+    const placeholders = ids.map(() => '?').join(',');
+    const sql = `
+      SELECT id, name, region, county, rating, positive_reviews, total_reviews,
+             lat, lng, image1
+      FROM attractions
+      WHERE id IN (${placeholders}) AND lat IS NOT NULL AND lng IS NOT NULL
+    `;
+    db.all(sql, ids, (err, rows) => {
+      if (err) return res.status(500).json({ error: err.message });
+      const data = rows.map(r => ({
+        id: r.id,
+        name: r.name,
+        region: r.region,
+        county: r.county,
+        rating: r.rating,
+        positive_reviews: r.positive_reviews,
+        total_reviews: r.total_reviews,
+        lat: typeof r.lat === 'string' ? parseFloat(r.lat) : r.lat,
+        lng: typeof r.lng === 'string' ? parseFloat(r.lng) : r.lng,
+        hasImage: !!r.image1,
+        country,
+      }));
+      res.json(data);
+      db.close();
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 
