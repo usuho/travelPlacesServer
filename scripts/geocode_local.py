@@ -519,6 +519,34 @@ def main():
                         city_param = ""
 
                     for qv in try_variants:
+                        # For China: prefer Amap first if key provided
+                        if is_cn and key_amap and not ll:
+                            # Prefer address geocode first
+                            ll = geocode_amap(qv, key_amap, city=city_param)
+                            if ll:
+                                used = "amap_geocode"
+                                used_query = qv
+                                break
+                            time.sleep(small_pause)
+                            # Fallback to POI text search
+                            ll = geocode_amap_place(qv, key_amap, city=city_param)
+                            if ll:
+                                used = "amap_place"
+                                used_query = qv
+                                break
+                            time.sleep(small_pause)
+
+                        #google first
+
+                        if not ll and key_google:
+                            ll = geocode_google(qv, country=args.country, api_key=key_google)
+                            if ll:
+                                used = "google"
+                                used_query = qv
+                                break
+                            time.sleep(small_pause)
+
+
                         # No-key providers
                         if not ll:
                             ll = geocode_photon(qv, lang=("zh" if is_cn else "en"))
@@ -585,30 +613,7 @@ def main():
                                 break
                             time.sleep(small_pause)
 
-                        if not ll and key_google:
-                            ll = geocode_google(qv, country=args.country, api_key=key_google)
-                            if ll:
-                                used = "google"
-                                used_query = qv
-                                break
-                            time.sleep(small_pause)
-
-                        # Country-specific (Amap for China) moved to last, if key is present
-                        if is_cn and key_amap and not ll:
-                            # Prefer address geocode first
-                            ll = geocode_amap(qv, key_amap, city=city_param)
-                            if ll:
-                                used = "amap_geocode"
-                                used_query = qv
-                                break
-                            time.sleep(small_pause)
-                            # Fallback to POI text search
-                            ll = geocode_amap_place(qv, key_amap, city=city_param)
-                            if ll:
-                                used = "amap_place"
-                                used_query = qv
-                                break
-                            time.sleep(small_pause)
+                        # (Amap already tried first for CN)
 
                     if ll:
                         break
@@ -641,4 +646,24 @@ def main():
 
 
 if __name__ == "__main__":
+    # 若直接运行 (例如拖拽 .db 文件到 exe 上)
+    if len(sys.argv) == 2 and sys.argv[1].lower().endswith(".db"):
+        db_path = sys.argv[1]
+        if not os.path.isfile(db_path):
+            print(f"数据库文件不存在: {db_path}")
+            sys.exit(1)
+        # 提取文件名作为国家名（去掉路径和扩展名）
+        country = os.path.splitext(os.path.basename(db_path))[0]
+        print(f"检测到拖入的数据库文件: {db_path}")
+        print(f"自动设置国家名: {country}")
+        # 构造伪命令行参数，传给 argparse
+        sys.argv = [sys.argv[0], "--db", db_path, "--country", country]
+
+    elif len(sys.argv) == 1:
+        print("用法示例：")
+        print("  拖动数据库文件到此程序上自动执行")
+        print("  或在命令行中手动运行：")
+        print("  geocode_local.exe --db path/to/japan.db --country japan")
+        sys.exit(0)
+
     main()
