@@ -3,12 +3,11 @@
 Geocode and populate lat/lng for a local SQLite attractions DB.
 
 - Ensures attractions.lat/lng columns exist (REAL).
-- For rows missing lat/lng, tries in order:
-  1) Parse from `position` ("lat,lng").
-  2) Country‑specific free providers (e.g., Amap for China if AMAP_KEY is set).
-  3) Free, no‑key providers: Photon (komoot), Open‑Meteo Geocoding.
-  4) Nominatim with countrycodes/viewbox + backoff.
-  5) Optional key‑based free tiers if keys exist: OpenCage, Geoapify, LocationIQ, MapQuest, Positionstack, Google.
+- For rows missing lat/lng, tries providers in order:
+  1) Country‑specific free providers (e.g., Amap for China if AMAP_KEY is set).
+  2) Free, no‑key providers: Photon (komoot), Open‑Meteo Geocoding.
+  3) Nominatim with countrycodes/viewbox + backoff.
+  4) Optional key‑based free tiers if keys exist: OpenCage, Geoapify, LocationIQ, MapQuest, Positionstack, Google.
 
 Usage examples:
   python travelPlacesServer/scripts/geocode_local.py --db path/to/japan.db --country japan
@@ -500,14 +499,12 @@ def main():
             sys.stdout.write(f"[{i}/{len(rows)}] id={rid}: ")
             sys.stdout.flush()
 
-            # 1) parse from position if possible
-            ll = parse_lat_lng_from_position(position)
+            # Build queries and try providers
             used = None
             used_query = None
-            if not ll:
-                queries = build_queries(position, name, region, county, args.country)
-                ll = None
-                for q in queries:
+            queries = build_queries(position, name, region, county, args.country)
+            ll = None
+            for q in queries:
                     # For CN queries written in non‑CJK, try appending 中国 as a variant
                     try_variants = [q]
                     if is_cn and not has_cjk(q):
@@ -625,7 +622,7 @@ def main():
                 continue
 
             lat_v, lng_v = ll
-            src = used or ("position" if parse_lat_lng_from_position(position) else "unknown")
+            src = used or "unknown"
             print(f"[{src}] ok -> {lat_v:.6f},{lng_v:.6f}")
 
             if not args.dry_run:
