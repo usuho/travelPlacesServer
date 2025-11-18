@@ -1,5 +1,5 @@
 ('D:\\App '
- 'Projects\\travalPlaces\\travelPlacesServer\\scripts\\build\\geocode_local\\PYZ-00.pyz',
+ 'Projects\\travelPlaces\\travelPlacesServer\\scripts\\build\\geocode_local\\PYZ-00.pyz',
  [('__future__',
    'D:\\Program Files\\Python\\Python312\\Lib\\__future__.py',
    'PYMODULE'),

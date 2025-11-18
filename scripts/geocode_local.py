@@ -25,6 +25,7 @@ import re
 import sqlite3
 import sys
 import time
+import math
 from typing import Optional, Tuple, List
 from datetime import datetime
 
@@ -33,6 +34,81 @@ try:
 except ImportError:
     print("Missing dependency: requests. Install with: pip install requests", file=sys.stderr)
     sys.exit(1)
+
+
+def haversine_distance(lat1, lng1, lat2, lng2):
+    """Haversine公式计算两点间距离（单位：km）"""
+    R = 6371  # 地球半径
+    d_lat = math.radians(lat2 - lat1)
+    d_lng = math.radians(lng2 - lng1)
+    a = math.sin(d_lat / 2) ** 2 + math.cos(math.radians(lat1)) * \
+        math.cos(math.radians(lat2)) * math.sin(d_lng / 2) ** 2
+    return 2 * R * math.asin(math.sqrt(a))
+
+
+def group_coordinates(coords: List[Tuple[float, float]], threshold_km: float = 20.0):
+    """
+    将经纬度数据按距离进行聚类（20km以内为同一组）
+    返回：[ [组1成员...], [组2成员...], ... ]
+    """
+    groups = []
+    for lat, lng in coords:
+        placed = False
+        for group in groups:
+            # 只需判断与组内第一个成员的距离
+            if haversine_distance(lat, lng, group[0][0], group[0][1]) <= threshold_km:
+                group.append((lat, lng))
+                placed = True
+                break
+        if not placed:
+            groups.append([(lat, lng)])
+    return groups
+
+
+def pick_best_coordinate(coords: List[Tuple[float, float]]):
+    """
+    根据规则选择最终经纬度：
+    1) 若出现完全重复经纬度 → 直接选出现次数最多的
+    2) 聚类 → 若组数相同 → 选组内平均距离最小的那一组
+    3) 返回该组的平均经纬度
+    """
+    if not coords:
+        return None
+
+    # 1) 检查是否有完全一致的经纬度
+    from collections import Counter
+    freq = Counter(coords)
+    best_exact = freq.most_common(1)[0]  # ( (lat,lng), count )
+    if best_exact[1] > 1:  # 出现超过1次 → 直接用它
+        return best_exact[0]
+
+    # 2) 聚类
+    groups = group_coordinates(coords)  # [[(lat,lng), ...], ...]
+
+    if not groups:
+        return None
+
+    # 3) 若成员数量相同 → 比较“组内平均离心度”（组内平均距离最小 = 更集中）
+    def group_score(g):
+        center_lat = sum(lat for lat, _ in g) / len(g)
+        center_lng = sum(lng for _, lng in g) / len(g)
+        # 组内每个点到中心的平均距离
+        import math
+        dists = [
+            haversine_distance(lat, lng, center_lat, center_lng)
+            for lat, lng in g
+        ]
+        return sum(dists) / len(dists)
+
+    # 先按成员数量降序 → 成员一样的就比较score
+    groups_sorted = sorted(groups, key=lambda g: (-len(g), group_score(g)))
+
+    best_group = groups_sorted[0]
+    avg_lat = sum(c[0] for c in best_group) / len(best_group)
+    avg_lng = sum(c[1] for c in best_group) / len(best_group)
+
+    return (avg_lat, avg_lng)
+
 
 
 def ensure_columns(conn: sqlite3.Connection, table: str = "attractions") -> None:
@@ -417,37 +493,38 @@ def has_cjk(s: str) -> bool:
     return any("\u4e00" <= ch <= "\u9fff" for ch in s)
 
 
-def build_queries(position: Optional[str], name: Optional[str], region: Optional[str], county: Optional[str], country: Optional[str]) -> List[str]:
+def build_queries(position: Optional[str], name, region, county, country):
+    pos_query = strip_noise(position) if position else None
+
     parts_base = [strip_noise(x) for x in [name, region, county, country] if x]
-    q_full = " ".join(parts_base)
-    out: List[str] = []
-    if position:
-        out.append(strip_noise(position))
-    if q_full:
-        out.append(q_full)
-    # progressively relax
+    other_queries = []
+
+    if parts_base:
+        other_queries.append(" ".join(parts_base))
     if name and country:
-        out.append(f"{strip_noise(name)} {strip_noise(country)}")
+        other_queries.append(f"{strip_noise(name)} {strip_noise(country)}")
     if name and region:
-        out.append(f"{strip_noise(name)} {strip_noise(region)} {strip_noise(country or '')}")
-    # domain-specific suffixes
-    if has_cjk(q_full):
-        for suf in ("景点", "公园", "博物馆", "风景区"):
-            out.append(f"{q_full} {suf}")
-    else:
-        for suf in ("tourist attraction", "park", "museum", "scenic area"):
-            out.append(f"{q_full} {suf}")
-    # dedupe while preserving order
+        other_queries.append(f"{strip_noise(name)} {strip_noise(region)} {strip_noise(country or '')}")
+
+    # 去重
     seen = set()
-    uniq = []
-    for q in out:
+    uniq_other = []
+    for q in other_queries:
         if q and q not in seen:
             seen.add(q)
-            uniq.append(q)
-    return uniq
+            uniq_other.append(q)
+
+    return pos_query, uniq_other
+
+def lang_for(country: str) -> str:
+    c = (country or "").lower()
+    if c in ("cn", "china"):
+        return "zh-CN,zh,en"
+    return "en"
 
 
 def main():
+    
     ap = argparse.ArgumentParser(description="Populate lat/lng for local attractions SQLite DB")
     ap.add_argument("--db", required=True, help="Path to local .db file")
     ap.add_argument("--country", default="", help="Country code/name to aid geocoding (optional)")
@@ -457,8 +534,57 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="Do not write changes")
     args = ap.parse_args()
 
+    # ========= API KEY 读取并打印 =========
+    key_google       = args.google_key or os.environ.get("GOOGLE_MAPS_API_KEY", "")
+    key_amap         = os.environ.get("AMAP_KEY", "")
+    key_opencage     = os.environ.get("OPENCAGE_KEY", "")
+    key_geoapify     = os.environ.get("GEOAPIFY_KEY", "")
+    key_locationiq   = os.environ.get("LOCATIONIQ_KEY", "")
+    key_mapquest     = os.environ.get("MAPQUEST_KEY", "")
+    key_positionstack= os.environ.get("POSITIONSTACK_KEY", "")
+
+    print("\n======= API KEY 状态 =======")
+    print("country        :", args.country or "(none)")
+    print("google         :", bool(key_google),       key_google[:6] + "..." if key_google else "")
+    print("amap           :", bool(key_amap))
+    print("opencage       :", bool(key_opencage))
+    print("geoapify       :", bool(key_geoapify))
+    print("locationiq     :", bool(key_locationiq))
+    print("mapquest       :", bool(key_mapquest))
+    print("positionstack  :", bool(key_positionstack))
+    print("============================\n")
+
+    # 🔹必须放到 ALL_APIS 之前！
+    is_cn = (args.country or "").lower() in ("cn", "china")
+
+
+    # 统一把 API 放一起管理
+    ALL_APIS = [
+        # 🔹 国内景点：AMap 优先使用
+        ("amap_geocode", lambda q: geocode_amap(q, key_amap, city="")) if (is_cn and key_amap) else None,
+        ("amap_place", lambda q: geocode_amap_place(q, key_amap, city="")) if (is_cn and key_amap) else None,
+
+        # 其余 API 统一尝试
+        ("google", lambda q: geocode_google(q, country=args.country, api_key=key_google)) if key_google else None,
+        ("photon", lambda q: geocode_photon(q, lang=("zh" if is_cn else "en"))),
+        ("open-meteo", lambda q: geocode_open_meteo(q, lang=("zh" if is_cn else "en"))),
+        ("nominatim", lambda q: geocode_nominatim_scoped(q, country=args.country, lang=lang_for(args.country))),
+        ("opencage", lambda q: geocode_opencage(q, key_opencage, args.country)) if key_opencage else None,
+        ("geoapify", lambda q: geocode_geoapify(q, key_geoapify, args.country)) if key_geoapify else None,
+        ("locationiq", lambda q: geocode_locationiq(q, key_locationiq, args.country)) if key_locationiq else None,
+        ("positionstack", lambda q: geocode_positionstack(q, key_positionstack, args.country)) if key_positionstack else None,
+
+        # 🔹 国外景点：AMap 作为最后备选（非中国 + 存在 key_amap）
+        ("amap_geocode", lambda q: geocode_amap(q, key_amap, city="")) if (not is_cn and key_amap) else None,
+    ]
+    # 去掉 None
+    ALL_APIS = [item for item in ALL_APIS if item]
+
+
+
     if not os.path.isfile(args.db):
         print(f"DB not found: {args.db}", file=sys.stderr)
+        input("\n按回车退出...")
         sys.exit(1)
 
     conn = sqlite3.connect(args.db)
@@ -467,7 +593,8 @@ def main():
 
         cur = conn.cursor()
         cur.execute(
-            "SELECT id, name, region, county, position, lat, lng FROM attractions WHERE lat IS NULL OR lng IS NULL"
+            "SELECT id, name, region, county, position, lat, lng "
+            "FROM attractions WHERE lat IS NULL OR lng IS NULL"
         )
         rows = cur.fetchall()
         total = len(rows)
@@ -477,190 +604,148 @@ def main():
 
         updated = 0
         failed = 0
-        contact = os.environ.get("CONTACT_EMAIL") or os.environ.get("CONTACT_URL") or "local"
-        ua = f"travelplaces-local/1.0 (+{contact})"
-        # keys (optional)
-        key_amap = os.environ.get("AMAP_KEY", "")
-        key_opencage = os.environ.get("OPENCAGE_KEY", "")
-        key_geoapify = os.environ.get("GEOAPIFY_KEY", "")
-        key_locationiq = os.environ.get("LOCATIONIQ_KEY", "")
-        key_mapquest = os.environ.get("MAPQUEST_KEY", "")
-        key_positionstack = os.environ.get("POSITIONSTACK_KEY", "")
-        key_google = args.google_key or os.environ.get("GOOGLE_MAPS_API_KEY", "")
         is_cn = (args.country or "").lower() in ("cn", "china")
         small_pause = 0.2
-        def lang_for(country: str) -> str:
-            c = (country or "").lower()
-            if c in ("cn", "china"):
-                return "zh-CN,zh,en"
-            return "en"
 
-        for i, (rid, name, region, county, position, lat, lng) in enumerate(rows, 1):
-            sys.stdout.write(f"[{i}/{len(rows)}] id={rid}: ")
-            sys.stdout.flush()
+        for idx, (rid, name, region, county, position, lat, lng) in enumerate(rows, 1):
+            print(f"[{idx}/{len(rows)}] id={rid}:")
+            pos_coords = []      # 仅 position 查询结果
+            other_coords = []    # 其他字段查询结果
 
-            # Build queries and try providers
-            used = None
-            used_query = None
-            queries = build_queries(position, name, region, county, args.country)
-            ll = None
-            for q in queries:
-                    # For CN queries written in non‑CJK, try appending 中国 as a variant
-                    try_variants = [q]
-                    if is_cn and not has_cjk(q):
-                        try_variants.append(q + " 中国")
+            # =============== record 函数分类 ===============
+            def record(api_name, result, qv, is_position):
+                if result:
+                    la, ln = result
+                    print(f"  [API:{api_name:12s}] {qv}  ->  {la:.6f}, {ln:.6f}")
+                    (pos_coords if is_position else other_coords).append((api_name, la, ln, qv))
+                else:
+                    print(f"  [API:{api_name:12s}] {qv}  ->  ❌ 无返回结果")
 
-                    # pick city param only when it's likely Chinese/adcode
-                    city_param = region or county or ""
-                    if city_param and not has_cjk(city_param):
-                        city_param = ""
+            # =============== 获取查询列表（已去掉 景点/公园 等） ===============
+            pos_query, other_queries = build_queries(position, name, region, county, args.country)
 
-                    for qv in try_variants:
-                        # For China: prefer Amap first if key provided
-                        if is_cn and key_amap and not ll:
-                            # Prefer address geocode first
-                            ll = geocode_amap(qv, key_amap, city=city_param)
-                            if ll:
-                                used = "amap_geocode"
-                                used_query = qv
-                                break
-                            time.sleep(small_pause)
-                            # Fallback to POI text search
-                            ll = geocode_amap_place(qv, key_amap, city=city_param)
-                            if ll:
-                                used = "amap_place"
-                                used_query = qv
-                                break
-                            time.sleep(small_pause)
+            # =============== 🔵 第一阶段：只尝试 position =====================
+            pos_coords = []
+            other_coords = []
+            if pos_query:
+                print(f"  -- [Position Query] {pos_query}")
 
-                        #google first
+                for api_name, api_func in ALL_APIS:  # 包含 key + 非 key
+                    result = api_func(pos_query)
+                    record(api_name, result, pos_query, is_position=True)
+                    time.sleep(small_pause)
 
-                        if not ll and key_google:
-                            ll = geocode_google(qv, country=args.country, api_key=key_google)
-                            if ll:
-                                used = "google"
-                                used_query = qv
-                                break
-                            time.sleep(small_pause)
+                # 🧠 检查 position 是否有效
+                pos_only = [(lat, lng) for _, lat, lng, _ in pos_coords]
+                pos_ll = pick_best_coordinate(pos_only)
+
+                if pos_ll and len(pos_only) >= 2:
+                    print("  === [position 已确定，不再使用其他字段] ===")
+                    final_lat, final_lng = pos_ll
+                    src = "position_only"
+
+                    print("  === [position 已确定，不再使用其他字段] ===")
+                    print("  🏁 Position 最终选定经纬度 -> "
+                        f"{final_lat:.6f}, {final_lng:.6f}")
+                    print("  📌 数据源:", src)
+                    print("  📌 API 明细:")
+                    for api_name, la, ln, qv in pos_coords:
+                        print(f"     - {api_name:12s} | {la:.6f}, {ln:.6f} | query={qv}")
 
 
-                        # No-key providers
-                        if not ll:
-                            ll = geocode_photon(qv, lang=("zh" if is_cn else "en"))
-                            if ll:
-                                used = "photon"
-                                used_query = qv
-                                break
-                            time.sleep(small_pause)
+                    # 写入数据库
+                    if not args.dry_run:
+                        cur.execute(
+                            "UPDATE attractions SET lat=?,lng=?,geo_source=?,geo_query=?,geo_updated_at=? WHERE id=?",
+                            (final_lat, final_lng, src, name or "",
+                            datetime.now().isoformat() + 'Z', rid),
+                        )
+                        updated += 1
+                    time.sleep(args.sleep_ms/1000.0)
+                    continue   # 🚀 直接处理下一行数据！
 
-                        if not ll:
-                            ll = geocode_open_meteo(qv, lang=("zh" if is_cn else "en"))
-                            if ll:
-                                used = "open-meteo"
-                                used_query = qv
-                                break
-                            time.sleep(small_pause)
+            # =============== 🟡 第二阶段：尝试其他字段 ======================
+            print("  -- [Other Fields Stage]")
+            for q in other_queries:
+                for api_name, api_func in ALL_APIS:
+                    result = api_func(q)
+                    record(api_name, result, q, is_position=False)
+                    time.sleep(small_pause)
 
-                        # Scoped Nominatim (with backoff inside)
-                        if not ll:
-                            ll = geocode_nominatim_scoped(qv, country=args.country, lang=lang_for(args.country))
-                            if ll:
-                                used = "nominatim"
-                                used_query = qv
-                                break
-
-                        # Optional key-based free tiers (if keys present)
-                        if not ll and key_opencage:
-                            ll = geocode_opencage(qv, key_opencage, args.country)
-                            if ll:
-                                used = "opencage"
-                                used_query = qv
-                                break
-                            time.sleep(small_pause)
-
-                        if not ll and key_geoapify:
-                            ll = geocode_geoapify(qv, key_geoapify, args.country)
-                            if ll:
-                                used = "geoapify"
-                                used_query = qv
-                                break
-                            time.sleep(small_pause)
-
-                        if not ll and key_locationiq:
-                            ll = geocode_locationiq(qv, key_locationiq, args.country)
-                            if ll:
-                                used = "locationiq"
-                                used_query = qv
-                                break
-                            time.sleep(small_pause)
-
-                        if not ll and key_mapquest:
-                            ll = geocode_mapquest(qv, key_mapquest, args.country)
-                            if ll:
-                                used = "mapquest"
-                                used_query = qv
-                                break
-                            time.sleep(small_pause)
-
-                        if not ll and key_positionstack:
-                            ll = geocode_positionstack(qv, key_positionstack, args.country)
-                            if ll:
-                                used = "positionstack"
-                                used_query = qv
-                                break
-                            time.sleep(small_pause)
-
-                        # (Amap already tried first for CN)
-
-                    if ll:
-                        break
-
-            if not ll:
+            # 选最佳结果
+            other_only = [(lat, lng) for _, lat, lng, _ in other_coords]
+            final_ll = pick_best_coordinate(other_only)
+            if final_ll:
+                final_lat, final_lng = final_ll
+                src = "full_fields"
+            else:
                 failed += 1
-                print("fail")
-                time.sleep(args.sleep_ms / 1000.0)
+                print("  ❌ 无法确定经纬度")
                 continue
 
-            lat_v, lng_v = ll
-            src = used or "unknown"
-            print(f"[{src}] ok -> {lat_v:.6f},{lng_v:.6f}")
-
+            # 写入 DB
+            print(f"  === 最终经纬度 -> {final_lat:.6f}, {final_lng:.6f} ===")
             if not args.dry_run:
                 cur.execute(
-                    "UPDATE attractions SET lat = ?, lng = ?, geo_source = ?, geo_query = ?, geo_updated_at = ? WHERE id = ?",
-                    (lat_v, lng_v, src, used_query or "", datetime.utcnow().isoformat(timespec='seconds') + 'Z', rid),
+                    "UPDATE attractions SET lat=?,lng=?,geo_source=?,geo_query=?,geo_updated_at=? WHERE id=?",
+                    (final_lat, final_lng, src, name or "",
+                    datetime.now().isoformat() + 'Z', rid),
                 )
                 updated += 1
 
-            # rate-limit across rows (Nominatim policy)
+                        
+            # =============== 写入数据库 ===============
+            print(f"  === 最终经纬度 -> {final_lat:.6f}, {final_lng:.6f} ===")
+            if not args.dry_run:
+                cur.execute(
+                    "UPDATE attractions SET lat = ?, lng = ?, geo_source = ?, geo_query = ?, geo_updated_at = ? WHERE id = ?",
+                    (final_lat, final_lng, src, name or "", datetime.now().isoformat() + 'Z', rid),
+                )
+                updated += 1
+
             time.sleep(args.sleep_ms / 1000.0)
 
         if not args.dry_run:
             conn.commit()
         print(f"Done. updated={updated}, failed={failed}")
+
+    except Exception as e:
+        print("\n❌ 程序出错：", e)
+        import traceback
+        print(traceback.format_exc())
+        input("\n按回车退出...")
+
     finally:
         conn.close()
 
 
+
 if __name__ == "__main__":
-    # 若直接运行 (例如拖拽 .db 文件到 exe 上)
-    if len(sys.argv) == 2 and sys.argv[1].lower().endswith(".db"):
-        db_path = sys.argv[1]
-        if not os.path.isfile(db_path):
-            print(f"数据库文件不存在: {db_path}")
-            sys.exit(1)
-        # 提取文件名作为国家名（去掉路径和扩展名）
-        country = os.path.splitext(os.path.basename(db_path))[0]
-        print(f"检测到拖入的数据库文件: {db_path}")
-        print(f"自动设置国家名: {country}")
-        # 构造伪命令行参数，传给 argparse
-        sys.argv = [sys.argv[0], "--db", db_path, "--country", country]
+    try:
+        # 拖动 .db 自动识别逻辑（保持你原来的）
+        if len(sys.argv) == 2 and sys.argv[1].lower().endswith(".db"):
+            db_path = sys.argv[1]
+            if not os.path.isfile(db_path):
+                print(f"数据库文件不存在: {db_path}")
+                input("\n按回车退出...")
+                sys.exit(1)
+            country = os.path.splitext(os.path.basename(db_path))[0]
+            print(f"检测到拖入的数据库文件: {db_path}")
+            print(f"自动设置国家名: {country}")
+            sys.argv = [sys.argv[0], "--db", db_path, "--country", country]
 
-    elif len(sys.argv) == 1:
-        print("用法示例：")
-        print("  拖动数据库文件到此程序上自动执行")
-        print("  或在命令行中手动运行：")
-        print("  geocode_local.exe --db path/to/japan.db --country japan")
-        sys.exit(0)
+        elif len(sys.argv) == 1:
+            print("用法示例：")
+            print("  拖动数据库文件到此程序上自动执行")
+            print("  或在命令行中手动运行：")
+            print("  geocode_local.exe --db path/to/japan.db --country japan")
+            input("\n按回车退出...")
+            sys.exit(0)
 
-    main()
+        main()
+
+    except Exception as e:
+        print("\n❌ 程序出错：", e)
+        import traceback
+        print(traceback.format_exc())
+        input("\n按回车退出...")
