@@ -36,6 +36,45 @@ except ImportError:
     sys.exit(1)
 
 
+def has_real_cluster(coords, threshold_km: float = 20.0) -> bool:
+    """
+    只要 coords 中存在任意一对点的距离 <= threshold_km，就认为“有聚类”。
+    否则认为没有聚类。
+    """
+    if not coords or len(coords) < 2:
+        return False
+    n = len(coords)
+    for i in range(n):
+        # coords 可能是 (lat, lng) 或 (lat, lng, api)，这里只取前两个
+        lat1, lng1 = coords[i][:2]
+        for j in range(i + 1, n):
+            lat2, lng2 = coords[j][:2]
+            if haversine_distance(lat1, lng1, lat2, lng2) <= threshold_km:
+                return True
+    return False
+
+def has_real_cluster_single_query(coords, threshold_km=20.0):
+    """
+    coords: List[(lat, lng)] 对于单个 qv 的所有返回结果
+    满足以下任意情况 → 有效聚类
+      ✔ 任意两点 < threshold_km   → True
+      ❌ 所有两点距离都 > threshold_km → False
+    """
+    if not coords or len(coords) < 2:
+        return False
+
+    n = len(coords)
+    for i in range(n):
+        # coords 同样可能包含 API 名，只取前两个元素
+        lat1, lng1 = coords[i][:2]
+        for j in range(i + 1, n):
+            lat2, lng2 = coords[j][:2]
+            if haversine_distance(lat1, lng1, lat2, lng2) <= threshold_km:
+                return True
+    return False
+
+
+
 def haversine_distance(lat1, lng1, lat2, lng2):
     """Haversine公式计算两点间距离（单位：km）"""
     R = 6371  # 地球半径
@@ -52,64 +91,67 @@ def group_coordinates(coords: List[Tuple[float, float]], threshold_km: float = 2
     返回：[ [组1成员...], [组2成员...], ... ]
     """
     groups = []
-    for lat, lng in coords:
+    for coord in coords:
+        if coord is None or len(coord) < 2:
+            continue
+        lat, lng = coord[0], coord[1]
         placed = False
         for group in groups:
             # 只需判断与组内第一个成员的距离
             if haversine_distance(lat, lng, group[0][0], group[0][1]) <= threshold_km:
-                group.append((lat, lng))
+                group.append(coord)
                 placed = True
                 break
         if not placed:
-            groups.append([(lat, lng)])
+            groups.append([coord])
     return groups
 
-
-def pick_best_coordinate(coords: List[Tuple[float, float]]):
+# Choose best cluster (prefer most members, tie-break by API order when available)
+def choose_best_cluster(groups, api_order):
     """
-    根据规则选择最终经纬度：
-    1) 若出现完全重复经纬度 → 直接选出现次数最多的
-    2) 聚类 → 若组数相同 → 选组内平均距离最小的那一组
-    3) 返回该组的平均经纬度
+    ?????????
+    ???????????? API ????
+    """
+    # ??????
+    groups_sorted = sorted(groups, key=lambda g: -len(g))
+    
+    # ????????? API ????????
+    if len(groups_sorted) > 1 and len(groups_sorted[0]) == len(groups_sorted[1]):
+        best_group = min(groups_sorted, key=lambda g: api_order.index(g[0][2]))  # g[0][2] ? API ??
+    else:
+        best_group = groups_sorted[0]
+    
+    return best_group
+
+def pick_best_coordinate(coords: List[Tuple[float, float]], api_order):
+    """
+    ??????????/???
+    1) ????????? -> ????????
+    2) ?? -> ???????????????? API ??
+    3) ??????????
     """
     if not coords:
         return None
 
-    # 1) 检查是否有完全一致的经纬度
+    # 1) ?????????????/??
     from collections import Counter
     freq = Counter(coords)
     best_exact = freq.most_common(1)[0]  # ( (lat,lng), count )
-    if best_exact[1] > 1:  # 出现超过1次 → 直接用它
+    if best_exact[1] > 1:  # ????>1 -> ????
         return best_exact[0]
 
-    # 2) 聚类
+    # 2) ??
     groups = group_coordinates(coords)  # [[(lat,lng), ...], ...]
 
     if not groups:
         return None
 
-    # 3) 若成员数量相同 → 比较“组内平均离心度”（组内平均距离最小 = 更集中）
-    def group_score(g):
-        center_lat = sum(lat for lat, _ in g) / len(g)
-        center_lng = sum(lng for _, lng in g) / len(g)
-        # 组内每个点到中心的平均距离
-        import math
-        dists = [
-            haversine_distance(lat, lng, center_lat, center_lng)
-            for lat, lng in g
-        ]
-        return sum(dists) / len(dists)
-
-    # 先按成员数量降序 → 成员一样的就比较score
-    groups_sorted = sorted(groups, key=lambda g: (-len(g), group_score(g)))
-
-    best_group = groups_sorted[0]
+    # ?????????????????API???
+    best_group = choose_best_cluster(groups, api_order)
     avg_lat = sum(c[0] for c in best_group) / len(best_group)
     avg_lng = sum(c[1] for c in best_group) / len(best_group)
 
     return (avg_lat, avg_lng)
-
-
 
 def ensure_columns(conn: sqlite3.Connection, table: str = "attractions") -> None:
     cur = conn.cursor()
@@ -211,7 +253,8 @@ def geocode_nominatim_scoped(query: str, country: str = "", lang: str = "zh-CN,z
             params["viewbox"] = f"{minx},{maxy},{maxx},{miny}"
             params["bounded"] = 1
     headers = {"User-Agent": "travelplaces-local/1.0", "Accept-Language": lang}
-    delay = 1.1
+    # 原来 delay=1.1，这里整体降为原来的 1/4
+    delay = 1.1 / 4
     for _ in range(max_retries):
         try:
             r = requests.get(url, params=params, headers=headers, timeout=20)
@@ -557,6 +600,17 @@ def main():
     # 🔹必须放到 ALL_APIS 之前！
     is_cn = (args.country or "").lower() in ("cn", "china")
 
+    api_order = [
+        "google",        # 最高优先级
+        "photon",        # 次高优先级
+        "open-meteo",    # 中等优先级
+        "nominatim",     # 低优先级
+        "opencage",      # 更低优先级
+        "geoapify",      # 更低优先级
+        "locationiq",    # 更低优先级
+        "positionstack"  # 最低优先级
+    ]
+
 
     # 统一把 API 放一起管理
     ALL_APIS = [
@@ -573,9 +627,6 @@ def main():
         ("geoapify", lambda q: geocode_geoapify(q, key_geoapify, args.country)) if key_geoapify else None,
         ("locationiq", lambda q: geocode_locationiq(q, key_locationiq, args.country)) if key_locationiq else None,
         ("positionstack", lambda q: geocode_positionstack(q, key_positionstack, args.country)) if key_positionstack else None,
-
-        # 🔹 国外景点：AMap 作为最后备选（非中国 + 存在 key_amap）
-        ("amap_geocode", lambda q: geocode_amap(q, key_amap, city="")) if (not is_cn and key_amap) else None,
     ]
     # 去掉 None
     ALL_APIS = [item for item in ALL_APIS if item]
@@ -605,7 +656,8 @@ def main():
         updated = 0
         failed = 0
         is_cn = (args.country or "").lower() in ("cn", "china")
-        small_pause = 0.2
+        # 将短暂停顿时间改为原来的 1/4（原为 0.1）
+        small_pause = 0.1 / 4
 
         for idx, (rid, name, region, county, position, lat, lng) in enumerate(rows, 1):
             print(f"[{idx}/{len(rows)}] id={rid}:")
@@ -628,41 +680,44 @@ def main():
             pos_coords = []
             other_coords = []
             if pos_query:
-                print(f"  -- [Position Query] {pos_query}")
+                if len(pos_query) < 30:
+                    print(f"  [Position Query] length < 30, skip position stage: {pos_query}")
+                else:
+                    print(f"  -- [Position Query] {pos_query}")
 
-                for api_name, api_func in ALL_APIS:  # 包含 key + 非 key
-                    result = api_func(pos_query)
-                    record(api_name, result, pos_query, is_position=True)
-                    time.sleep(small_pause)
+                    for api_name, api_func in ALL_APIS:  # 包含 key + 非 key
+                        result = api_func(pos_query)
+                        record(api_name, result, pos_query, is_position=True)
+                        time.sleep(small_pause)
 
-                # 🧠 检查 position 是否有效
-                pos_only = [(lat, lng) for _, lat, lng, _ in pos_coords]
-                pos_ll = pick_best_coordinate(pos_only)
+                    # 🧠 检查 position 是否有效
+                    pos_only = [(lat, lng, api) for api, lat, lng, _ in pos_coords]
+                    pos_ll = pick_best_coordinate(pos_only, api_order)
 
-                if pos_ll and len(pos_only) >= 2:
-                    print("  === [position 已确定，不再使用其他字段] ===")
-                    final_lat, final_lng = pos_ll
-                    src = "position_only"
+                    if pos_ll and len(pos_only) >= 2:
+                        print("  === [position 已确定，不再使用其他字段] ===")
+                        final_lat, final_lng = pos_ll
+                        src = "position_only"
 
-                    print("  === [position 已确定，不再使用其他字段] ===")
-                    print("  🏁 Position 最终选定经纬度 -> "
-                        f"{final_lat:.6f}, {final_lng:.6f}")
-                    print("  📌 数据源:", src)
-                    print("  📌 API 明细:")
-                    for api_name, la, ln, qv in pos_coords:
-                        print(f"     - {api_name:12s} | {la:.6f}, {ln:.6f} | query={qv}")
+                        print("  === [position 已确定，不再使用其他字段] ===")
+                        print("  🏁 Position 最终选定经纬度 -> "
+                            f"{final_lat:.6f}, {final_lng:.6f}")
+                        print("  📌 数据源:", src)
+                        print("  📌 API 明细:")
+                        for api_name, la, ln, qv in pos_coords:
+                            print(f"     - {api_name:12s} | {la:.6f}, {ln:.6f} | query={qv}")
 
 
-                    # 写入数据库
-                    if not args.dry_run:
-                        cur.execute(
-                            "UPDATE attractions SET lat=?,lng=?,geo_source=?,geo_query=?,geo_updated_at=? WHERE id=?",
-                            (final_lat, final_lng, src, name or "",
-                            datetime.now().isoformat() + 'Z', rid),
-                        )
-                        updated += 1
-                    time.sleep(args.sleep_ms/1000.0)
-                    continue   # 🚀 直接处理下一行数据！
+                        # 写入数据库
+                        if not args.dry_run:
+                            cur.execute(
+                                "UPDATE attractions SET lat=?,lng=?,geo_source=?,geo_query=?,geo_updated_at=? WHERE id=?",
+                                (final_lat, final_lng, src, name or "",
+                                datetime.now().isoformat() + 'Z', rid),
+                            )
+                            updated += 1
+                        time.sleep(args.sleep_ms/250.0)
+                        continue   # 🚀 直接处理下一行数据！
 
             # =============== 🟡 第二阶段：尝试其他字段 ======================
             print("  -- [Other Fields Stage]")
@@ -672,26 +727,110 @@ def main():
                     record(api_name, result, q, is_position=False)
                     time.sleep(small_pause)
 
-            # 选最佳结果
-            other_only = [(lat, lng) for _, lat, lng, _ in other_coords]
-            final_ll = pick_best_coordinate(other_only)
-            if final_ll:
-                final_lat, final_lng = final_ll
-                src = "full_fields"
+            # =============== position vs other_queries 最终决策 ===============
+            from collections import Counter
+
+            # position 所有返回的经纬度
+            pos_only = [(lat, lng, api) for api, lat, lng, _ in pos_coords]
+            pos_ll = pick_best_coordinate(pos_only, api_order) if pos_only else None
+
+            # other 所有返回的经纬度
+            other_only = [(lat, lng, api) for api, lat, lng, _ in other_coords]
+
+            # 按 query 分组统计 other 结果
+            query_counts = Counter(qv for _, _, _, qv in other_coords)
+
+            # 🚩 NEW：逐个词条判断是否聚类，并统计“聚类后有效成员数量”
+            cluster_info = []  # [(qv, valid_cluster_coords, center_point, valid_count)]
+
+            for qv in query_counts.keys():
+                # 获取该词条所有经纬度
+                coords_for_qv = [(lat, lng, api) for api, lat, lng, qv2 in other_coords if qv2 == qv]
+                if len(coords_for_qv) >= 2:
+                    # 先分组
+                    groups = group_coordinates(coords_for_qv, threshold_km=20.0)
+                    # 选成员最多的那个组
+                    groups_sorted = sorted(groups, key=lambda g: -len(g))
+                    best_group = groups_sorted[0]
+
+                    # 判断是否形成聚类：该组内至少有两个点且距离 <20km
+                    if has_real_cluster_single_query(best_group, 20.0):
+                        center_qv = pick_best_coordinate(best_group, api_order)  # 只算这一组的中心点
+                        valid_count = len(best_group)  # “真正有效的聚类成员数量”‼ ← 用这个比较
+                        cluster_info.append((qv, best_group, center_qv, valid_count))
+
+            # 是否有词条形成聚类
+            has_cluster_other = len(cluster_info) > 0
+
+            # 🔍 选择最终词条：
+            # 1. 有效聚类成员数量最多的
+            # 2. 若一样多 → 在 other_queries 中靠前的词条优先
+            chosen_qv = None
+            chosen_center = None
+
+            if has_cluster_other:
+                cluster_info.sort(
+                    key=lambda x: (-x[3], other_queries.index(x[0]))  # ← 用 valid_count 排序‼
+                )
+                chosen_qv, valid_coords, chosen_center, valid_count = cluster_info[0]
+                print(f"  🔍 最终使用聚类字段: '{chosen_qv}' (有效聚类成员数={valid_count})")
+
+            # 🧠 position vs other 决策
+            if pos_ll and not has_cluster_other:
+                final_lat, final_lng = pos_ll
+                src = "position_preferred_no_cluster"
+
+            elif has_cluster_other:
+                final_lat, final_lng = chosen_center  # 只用该词条聚类后的中心点
+                src = f"cluster_from_query: {chosen_qv}"
+
             else:
-                failed += 1
-                print("  ❌ 无法确定经纬度")
-                continue
+                # 🚨 position 无结果 & other 无聚类
+                # 👉 Fallback：使用第一个 other 里有返回经纬度的词条
+                #    例如：虽然没有聚类，但某词条有一个 API 返回了数据 → 可以使用！
+                # 注意：只要有一个词条有返回，就要用！
+                fallback_coord = None
+                fallback_qv = None
+
+                for qv in other_queries:                          # 按顺序找第一个 "有返回结果" 的词条
+                    coords_for_qv = [(lat, lng, api) for api, lat, lng, qv2 in other_coords if qv2 == qv]
+                    if coords_for_qv:                             # 有结果
+                        fallback_coord = pick_best_coordinate(coords_for_qv, api_order)  # 用已有返回点选最佳
+                        fallback_qv = qv
+                        break
+
+                if fallback_coord:                               # 至少有一个字段有返回值
+                    final_lat, final_lng = fallback_coord
+                    src = f"fallback_from_query: {fallback_qv}"
+                    print(f"  ⚠ 未聚类，但使用了 fallback 字段: '{fallback_qv}'")
+                else:
+                    failed += 1                                   # 所有字段都没结果 → 真的失败！
+                    print("  ❌ 所有字段都没有任何返回结果 → 无法确定经纬度")
+                    continue
+
+            # 📌 日志打印
+            print("  📌 position 结果数:", len(pos_only))
+            print("  📌 other_queries 每个关键字结果数:", dict(query_counts))
+            print(f"  📌 other 是否有聚类: {has_cluster_other}")
+            if has_cluster_other:
+                print("  📌 使用 query:", chosen_qv)
+                print("  📌 有效聚类成员:", valid_coords)
+            print(f"  === 最终经纬度 -> {final_lat:.6f}, {final_lng:.6f} ===")
+            print(f"  📌 选择来源: {src}")
+
+
+
 
             # 写入 DB
-            print(f"  === 最终经纬度 -> {final_lat:.6f}, {final_lng:.6f} ===")
             if not args.dry_run:
                 cur.execute(
-                    "UPDATE attractions SET lat=?,lng=?,geo_source=?,geo_query=?,geo_updated_at=? WHERE id=?",
-                    (final_lat, final_lng, src, name or "",
-                    datetime.now().isoformat() + 'Z', rid),
+                    "UPDATE attractions SET lat = ?, lng = ?, geo_source = ?, geo_query = ?, geo_updated_at = ? WHERE id = ?",
+                    (final_lat, final_lng, src, name or "", datetime.now().isoformat() + 'Z', rid),
                 )
                 updated += 1
+
+            time.sleep(args.sleep_ms / 250.0)
+
 
                         
             # =============== 写入数据库 ===============
@@ -703,7 +842,7 @@ def main():
                 )
                 updated += 1
 
-            time.sleep(args.sleep_ms / 1000.0)
+            time.sleep(args.sleep_ms / 250.0)
 
         if not args.dry_run:
             conn.commit()
@@ -749,3 +888,6 @@ if __name__ == "__main__":
         import traceback
         print(traceback.format_exc())
         input("\n按回车退出...")
+
+    finally:
+        input("\n任务完成，按回车退出...")  # <--- ✨ 添加这行！
