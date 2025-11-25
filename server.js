@@ -297,7 +297,15 @@ app.get('/api/attractions-positions/:country', async (req, res) => {
   try {
   const db = await connectToDatabase(country);
   if (!db) throw new Error('数据库连接失败');
-  const sql = 'SELECT id, name, region, county, rating, positive_reviews, position, image1 FROM attractions';
+  const sql = `
+    SELECT a.id, a.name, a.region, a.county, a.rating, a.positive_reviews, a.position, a.image1
+    FROM attractions a
+    INNER JOIN (
+      SELECT name, region, MIN(id) AS min_id
+      FROM attractions
+      GROUP BY name, region
+    ) g ON a.name = g.name AND a.region = g.region AND a.id = g.min_id
+  `;
   db.all(sql, [], (err, rows) => {
     if (err) return res.status(500).json({ error: err.message });
     const data = rows.map(r => ({
@@ -534,10 +542,16 @@ app.get('/api/attractions-geo/:country', async (req, res) => {
     const hasLatLng = cols.has('lat') && cols.has('lng');
     if (!hasLatLng) { db.close(); return res.json([]); }
     const sql = `
-      SELECT id, name, region, county, rating, positive_reviews, total_reviews,
-             lat, lng, image1
-      FROM attractions
-      WHERE lat IS NOT NULL AND lng IS NOT NULL
+      SELECT a.id, a.name, a.region, a.county, a.rating, a.positive_reviews, a.total_reviews,
+             a.lat, a.lng, a.image1
+      FROM attractions a
+      INNER JOIN (
+        SELECT name, region, MIN(id) AS min_id
+        FROM attractions
+        WHERE lat IS NOT NULL AND lng IS NOT NULL
+        GROUP BY name, region
+      ) g ON a.name = g.name AND a.region = g.region AND a.id = g.min_id
+      WHERE a.lat IS NOT NULL AND a.lng IS NOT NULL
     `;
     db.all(sql, [], (err, rows) => {
       if (err) return res.status(500).json({ error: err.message });
