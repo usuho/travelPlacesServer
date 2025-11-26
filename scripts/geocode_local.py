@@ -536,6 +536,15 @@ def has_cjk(s: str) -> bool:
     return any("\u4e00" <= ch <= "\u9fff" for ch in s)
 
 
+def cjk_ratio(s: str) -> float:
+    """Return share of characters that are CJK Unified Ideographs."""
+    if not s:
+        return 0.0
+    total = len(s)
+    cjk_count = sum(1 for ch in s if "\u4e00" <= ch <= "\u9fff")
+    return cjk_count / total
+
+
 def build_queries(position: Optional[str], name, region, county, country):
     pos_query = strip_noise(position) if position else None
 
@@ -680,8 +689,12 @@ def main():
             pos_coords = []
             other_coords = []
             if pos_query:
-                if len(pos_query) < 30:
-                    print(f"  [Position Query] length < 30, skip position stage: {pos_query}")
+                pos_len = len(pos_query)
+                pos_cjk_ratio = cjk_ratio(pos_query)
+                skip_limit = 10 if pos_cjk_ratio >= 0.5 else 30
+
+                if pos_len < skip_limit:
+                    print(f"  [Position Query] length<{skip_limit} (CJK ratio={pos_cjk_ratio:.2f}), skip position stage: {pos_query}")
                 else:
                     print(f"  -- [Position Query] {pos_query}")
 
@@ -693,8 +706,10 @@ def main():
                     # 🧠 检查 position 是否有效
                     pos_only = [(lat, lng, api) for api, lat, lng, _ in pos_coords]
                     pos_ll = pick_best_coordinate(pos_only, api_order)
+                    pos_clustered = len(pos_only) >= 2 and has_real_cluster(pos_only, 20.0)
 
-                    if pos_ll and len(pos_only) >= 2:
+                    # 仅当 position 至少有 2 个结果且形成聚类时，才单独使用 position
+                    if pos_ll and pos_clustered:
                         print("  === [position 已确定，不再使用其他字段] ===")
                         final_lat, final_lng = pos_ll
                         src = "position_only"

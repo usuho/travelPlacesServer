@@ -1,5 +1,7 @@
-const os = require('os');
+
 require('dotenv').config();
+console.log("API_KEY is:", process.env.API_KEY);
+const os = require('os');
 const express = require('express');
 const sqlite3 = require('sqlite3').verbose();
 /*const mongoose = require('mongoose');*/
@@ -13,6 +15,7 @@ const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const API_KEY = process.env.API_KEY;
 
 function getLocalIPAddress() {
   const interfaces = os.networkInterfaces();
@@ -37,6 +40,20 @@ app.get('/api/ip', (req, res) => {
   res.json({ ip: host, port: PORT });
 });
 
+function requireApiKey(req, res, next) {
+  if (!API_KEY) {
+    return next();
+  }
+
+  const requestKey = req.header('x-api-key') || req.query.api_key;
+
+  if (requestKey && requestKey === API_KEY) {
+    return next();
+  }
+
+  return res.status(401).json({ error: 'Invalid or missing API key' });
+}
+
 app.use((req, res, next) => {
   res.setHeader('Cache-Control', 'public, max-age=315360000'); // 缓存 10 年
   next();
@@ -55,6 +72,8 @@ app.use(cors({
   credentials: true,
   optionsSuccessStatus: 204
 }));
+
+app.use('/api', requireApiKey);
 
 // 辅助函数：连接到正确的数据库
 async function connectToDatabase(country) {
