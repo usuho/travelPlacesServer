@@ -1,6 +1,5 @@
 
 require('dotenv').config();
-console.log("API_KEY is:", process.env.API_KEY);
 const os = require('os');
 const express = require('express');
 const sqlite3 = require('sqlite3').verbose();
