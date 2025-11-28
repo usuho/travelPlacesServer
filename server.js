@@ -21,6 +21,7 @@ const USER_BUCKET = process.env.AWS_USER_BUCKET || 'travelplacesbucketjapan';
 const USER_PREFIX = process.env.AWS_USER_PREFIX || 'users/';
 const AUTH_TOKEN_SECRET = process.env.AUTH_TOKEN_SECRET || process.env.API_KEY || 'travelplaces-secret';
 const BCRYPT_ROUNDS = parseInt(process.env.BCRYPT_ROUNDS || '10', 10);
+const SESSION_TTL_MS = parseInt(process.env.SESSION_TTL_MS || `${30 * 24 * 60 * 60 * 1000}`, 10); // default 30 days
 const COUNTRY_TRANSLATIONS = {
   'afghanistan': '阿富汗', 'albania': '阿尔巴尼亚', 'algeria': '阿尔及利亚', 'andorra': '安道尔', 'angola': '安哥拉',
   'antigua and barbuda': '安提瓜和巴布达', 'argentina': '阿根廷', 'armenia': '亚美尼亚', 'australia': '澳大利亚',
@@ -116,7 +117,10 @@ app.get('/api/ip', (req, res) => {
   res.json({ ip: host, port: PORT });
 });
 
+const AUTH_SKIP_PATHS = new Set(['/api/login', '/api/register', '/login', '/register']);
+
 function requireApiKey(req, res, next) {
+  if (AUTH_SKIP_PATHS.has(req.path)) return next();
   if (!API_KEY) {
     return next();
   }
@@ -128,6 +132,43 @@ function requireApiKey(req, res, next) {
   }
 
   return res.status(401).json({ error: 'Invalid or missing API key' });
+}
+
+function requireAuthToken(req, res, next) {
+  if (AUTH_SKIP_PATHS.has(req.path)) return next();
+  const header = req.headers.authorization || '';
+  const bearer = header.startsWith('Bearer ') ? header.slice(7) : '';
+  const token = bearer || req.query.token || '';
+  const verified = verifySessionToken(token);
+  if (!verified) {
+    return res.status(401).json({ error: 'Invalid or missing auth token' });
+  }
+  req.user = { username: verified.username, issuedAt: verified.issuedAt };
+  return next();
+}
+
+function requireApiKeyOrAuthToken(req, res, next) {
+  if (AUTH_SKIP_PATHS.has(req.path)) return next();
+
+  // API key 通过则放行
+  if (API_KEY) {
+    const requestKey = req.header('x-api-key') || req.query.api_key;
+    if (requestKey && requestKey === API_KEY) {
+      return next();
+    }
+  }
+
+  // Bearer token 通过则放行
+  const header = req.headers.authorization || '';
+  const bearer = header.startsWith('Bearer ') ? header.slice(7) : '';
+  const token = bearer || req.query.token || '';
+  const verified = verifySessionToken(token);
+  if (verified) {
+    req.user = { username: verified.username, issuedAt: verified.issuedAt };
+    return next();
+  }
+
+  return res.status(401).json({ error: 'Invalid or missing API key or auth token' });
 }
 
 app.use((req, res, next) => {
@@ -149,7 +190,8 @@ app.use(cors({
   optionsSuccessStatus: 204
 }));
 
-app.use('/api', requireApiKey);
+// API key 或登录 token 任一通过即可（登录/注册跳过）
+app.use('/api', requireApiKeyOrAuthToken);
 
 // 辅助函数：连接到正确的数据库
 async function connectToDatabase(country) {
@@ -251,6 +293,32 @@ function createSessionToken(username) {
     .replace(/\+/g, '-')
     .replace(/\//g, '_')
     .replace(/=+$/, '');
+}
+
+function verifySessionToken(token) {
+  if (!token) return null;
+  try {
+    const raw = Buffer.from(
+      token.replace(/-/g, '+').replace(/_/g, '/'),
+      'base64'
+    ).toString('utf-8');
+    const parts = raw.split(':');
+    if (parts.length !== 4) return null;
+    const [username, issuedAtStr, nonce, signature] = parts;
+    const payload = `${username}:${issuedAtStr}:${nonce}`;
+    const expected = crypto.createHmac('sha256', AUTH_TOKEN_SECRET)
+      .update(payload)
+      .digest('hex');
+    if (expected !== signature) return null;
+    const issuedAt = Number(issuedAtStr);
+    if (!Number.isFinite(issuedAt)) return null;
+    if (SESSION_TTL_MS > 0 && Date.now() - issuedAt > SESSION_TTL_MS) {
+      return null;
+    }
+    return { username, issuedAt };
+  } catch (_) {
+    return null;
+  }
 }
 
 function normalizeCountryKey(val) {
