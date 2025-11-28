@@ -7,14 +7,91 @@ const sqlite3 = require('sqlite3').verbose();
 const bodyParser = require('body-parser');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
-const User = require('./models/User');
 const AWS = require('aws-sdk');
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const API_KEY = process.env.API_KEY;
+const AWS_REGION = process.env.AWS_REGION || 'ap-northeast-1';
+const DATA_BUCKET = process.env.AWS_DATA_BUCKET || 'travelplacesbucketjapan';
+const USER_BUCKET = process.env.AWS_USER_BUCKET || 'travelplacesbucketjapan';
+const USER_PREFIX = process.env.AWS_USER_PREFIX || 'users/';
+const AUTH_TOKEN_SECRET = process.env.AUTH_TOKEN_SECRET || process.env.API_KEY || 'travelplaces-secret';
+const BCRYPT_ROUNDS = parseInt(process.env.BCRYPT_ROUNDS || '10', 10);
+const COUNTRY_TRANSLATIONS = {
+  'afghanistan': '阿富汗', 'albania': '阿尔巴尼亚', 'algeria': '阿尔及利亚', 'andorra': '安道尔', 'angola': '安哥拉',
+  'antigua and barbuda': '安提瓜和巴布达', 'argentina': '阿根廷', 'armenia': '亚美尼亚', 'australia': '澳大利亚',
+  'austria': '奥地利', 'azerbaijan': '阿塞拜疆', 'bahamas': '巴哈马', 'bahrain': '巴林', 'bangladesh': '孟加拉国',
+  'barbados': '巴巴多斯', 'belarus': '白俄罗斯', 'belgium': '比利时', 'belize': '伯利兹', 'benin': '贝宁', 'bhutan': '不丹',
+  'bolivia': '玻利维亚', 'bosnia and herzegovina': '波黑', 'botswana': '博茨瓦纳', 'brazil': '巴西', 'brunei': '文莱',
+  'bulgaria': '保加利亚', 'burkina faso': '布基纳法索', 'burundi': '布隆迪', 'cabo verde': '佛得角', 'cambodia': '柬埔寨',
+  'cameroon': '喀麦隆', 'canada': '加拿大', 'central african republic': '中非共和国', 'chad': '乍得', 'chile': '智利',
+  'china': '中国', 'colombia': '哥伦比亚', 'comoros': '科摩罗', 'congo': '刚果', 'costa rica': '哥斯达黎加',
+  "cote d'ivoire": '科特迪瓦', 'croatia': '克罗地亚', 'cuba': '古巴', 'cyprus': '塞浦路斯', 'czechia': '捷克',
+  'denmark': '丹麦', 'djibouti': '吉布提', 'dominica': '多米尼克', 'dominican republic': '多米尼加', 'ecuador': '厄瓜多尔',
+  'egypt': '埃及', 'el salvador': '萨尔瓦多', 'equatorial guinea': '赤道几内亚', 'eritrea': '厄立特里亚', 'estonia': '爱沙尼亚',
+  'eswatini': '埃斯瓦蒂尼', 'ethiopia': '埃塞俄比亚', 'fiji': '斐济', 'finland': '芬兰', 'france': '法国', 'gabon': '加蓬',
+  'gambia': '冈比亚', 'georgia': '格鲁吉亚', 'germany': '德国', 'ghana': '加纳', 'greece': '希腊', 'grenada': '格林纳达',
+  'guatemala': '危地马拉', 'guinea': '几内亚', 'guinea-bissau': '几内亚比绍', 'guyana': '圭亚那', 'haiti': '海地',
+  'holy see': '梵蒂冈', 'honduras': '洪都拉斯', 'hungary': '匈牙利', 'iceland': '冰岛', 'india': '印度',
+  'indonesia': '印度尼西亚', 'iran': '伊朗', 'iraq': '伊拉克', 'ireland': '爱尔兰', 'israel': '以色列', 'italy': '意大利',
+  'jamaica': '牙买加', 'japan': '日本', 'jordan': '约旦', 'kazakhstan': '哈萨克斯坦', 'kenya': '肯尼亚', 'kiribati': '基里巴斯',
+  'kuwait': '科威特', 'kyrgyzstan': '吉尔吉斯斯坦', 'laos': '老挝', 'latvia': '拉脱维亚', 'lebanon': '黎巴嫩',
+  'lesotho': '莱索托', 'liberia': '利比里亚', 'libya': '利比亚', 'liechtenstein': '列支敦士登', 'lithuania': '立陶宛',
+  'luxembourg': '卢森堡', 'madagascar': '马达加斯加', 'malawi': '马拉维', 'malaysia': '马来西亚', 'maldives': '马尔代夫',
+  'mali': '马里', 'malta': '马耳他', 'marshall islands': '马绍尔群岛', 'mauritania': '毛里塔尼亚', 'mauritius': '毛里求斯',
+  'mexico': '墨西哥', 'micronesia': '密克罗尼西亚', 'moldova': '摩尔多瓦', 'monaco': '摩纳哥', 'mongolia': '蒙古',
+  'montenegro': '黑山', 'morocco': '摩洛哥', 'mozambique': '莫桑比克', 'myanmar': '缅甸', 'namibia': '纳米比亚',
+  'nauru': '瑙鲁', 'nepal': '尼泊尔', 'netherlands': '荷兰', 'new zealand': '新西兰', 'nicaragua': '尼加拉瓜', 'niger': '尼日尔',
+  'nigeria': '尼日利亚', 'north korea': '朝鲜', 'north macedonia': '北马其顿', 'norway': '挪威', 'oman': '阿曼',
+  'pakistan': '巴基斯坦', 'palau': '帕劳', 'panama': '巴拿马', 'papua new guinea': '巴布亚新几内亚', 'paraguay': '巴拉圭',
+  'peru': '秘鲁', 'philippines': '菲律宾', 'poland': '波兰', 'portugal': '葡萄牙', 'qatar': '卡塔尔', 'romania': '罗马尼亚',
+  'russia': '俄罗斯', 'rwanda': '卢旺达', 'saint kitts and nevis': '圣基茨和尼维斯', 'saint lucia': '圣卢西亚',
+  'saint vincent and the grenadines': '圣文森特和格林纳丁斯', 'samoa': '萨摩亚', 'san marino': '圣马力诺',
+  'sao tome and principe': '圣多美和普林西比', 'saudi arabia': '沙特阿拉伯', 'senegal': '塞内加尔', 'serbia': '塞尔维亚',
+  'seychelles': '塞舌尔', 'sierra leone': '塞拉利昂', 'singapore': '新加坡', 'slovakia': '斯洛伐克', 'slovenia': '斯洛文尼亚',
+  'solomon islands': '所罗门群岛', 'somalia': '索马里', 'south africa': '南非', 'south korea': '韩国', 'south sudan': '南苏丹',
+  'spain': '西班牙', 'sri lanka': '斯里兰卡', 'sudan': '苏丹', 'suriname': '苏里南', 'sweden': '瑞典', 'switzerland': '瑞士',
+  'syria': '叙利亚', 'tajikistan': '塔吉克斯坦', 'tanzania': '坦桑尼亚', 'thailand': '泰国', 'timor-leste': '东帝汶',
+  'togo': '多哥', 'tonga': '汤加', 'trinidad and tobago': '特立尼达和多巴哥', 'tunisia': '突尼斯', 'turkey': '土耳其',
+  'turkmenistan': '土库曼斯坦', 'tuvalu': '图瓦卢', 'uganda': '乌干达', 'ukraine': '乌克兰', 'united arab emirates': '阿联酋',
+  'united kingdom': '英国', 'united states': '美国', 'uruguay': '乌拉圭', 'uzbekistan': '乌兹别克斯坦', 'vanuatu': '瓦努阿图',
+  'venezuela': '委内瑞拉', 'vietnam': '越南', 'yemen': '也门', 'zambia': '赞比亚', 'zimbabwe': '津巴布韦'
+};
+const ALLOWED_COUNTRIES = Object.keys(COUNTRY_TRANSLATIONS);
+const COUNTRY_ALIASES = {
+  usa: 'united states',
+  'united states of america': 'united states',
+  us: 'united states',
+  america: 'united states',
+  uk: 'united kingdom',
+  'great britain': 'united kingdom',
+  uae: 'united arab emirates',
+  'south korea': 'south korea',
+  'republic of korea': 'south korea',
+  korea: 'south korea',
+  'north korea': 'north korea',
+  'czech republic': 'czechia',
+  'ivory coast': "cote d'ivoire",
+  'drc': 'congo',
+  'democratic republic of the congo': 'congo',
+  'congo-brazzaville': 'congo',
+  'congo brazzaville': 'congo'
+};
+const ALLOWED_COUNTRY_SET = new Set(ALLOWED_COUNTRIES.map(normalizeCountryKey));
+const COUNTRY_ALIAS_MAP = (() => {
+  const acc = {};
+  Object.entries(COUNTRY_ALIASES).forEach(([k, v]) => {
+    acc[normalizeCountryKey(k)] = normalizeCountryKey(v);
+  });
+  Object.entries(COUNTRY_TRANSLATIONS).forEach(([en, zh]) => {
+    acc[normalizeCountryKey(zh)] = normalizeCountryKey(en);
+  });
+  return acc;
+})();
 
 function getLocalIPAddress() {
   const interfaces = os.networkInterfaces();
@@ -61,7 +138,7 @@ app.use((req, res, next) => {
 const s3 = new AWS.S3({
   accessKeyId: process.env.AWS_ACCESS_KEY_ID,
   secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-  region: 'ap-northeast-1'
+  region: AWS_REGION
 });
 
 // 中间件
@@ -77,7 +154,7 @@ app.use('/api', requireApiKey);
 // 辅助函数：连接到正确的数据库
 async function connectToDatabase(country) {
   const params = {
-    Bucket: 'travelplacesbucketjapan',
+    Bucket: DATA_BUCKET,
     Key: `${country}.db`,
   };
 
@@ -115,7 +192,7 @@ function getTableColumns(db, tableName) {
 // 从S3读取图片并转换为Base64
 async function getImageFromS3(imageKey) {
   const params = {
-    Bucket: 'travelplacesbucketjapan',
+    Bucket: DATA_BUCKET,
     Key: imageKey
   };
 
@@ -126,6 +203,66 @@ async function getImageFromS3(imageKey) {
     console.error('从S3读取图片出错:', error.message);
     return null;
   }
+}
+
+function getUserKey(username) {
+  const safe = encodeURIComponent(String(username));
+  const prefix = USER_PREFIX.endsWith('/') ? USER_PREFIX : `${USER_PREFIX}/`;
+  return `${prefix}${safe}.json`;
+}
+
+async function getUserFromS3(username) {
+  if (!username) return null;
+  const Key = getUserKey(username);
+  try {
+    const data = await s3.getObject({ Bucket: USER_BUCKET, Key }).promise();
+    const body = data.Body ? data.Body.toString('utf-8') : '';
+    return body ? JSON.parse(body) : null;
+  } catch (err) {
+    if (err && (err.code === 'NoSuchKey' || err.code === 'NotFound' || err.statusCode === 404)) {
+      return null;
+    }
+    console.error('读取用户失败:', err.message || err);
+    throw err;
+  }
+}
+
+async function saveUserToS3(userItem) {
+  const Key = getUserKey(userItem.username);
+  const body = JSON.stringify(userItem);
+  await s3.putObject({
+    Bucket: USER_BUCKET,
+    Key,
+    Body: body,
+    ContentType: 'application/json',
+    ACL: 'private'
+  }).promise();
+}
+
+function createSessionToken(username) {
+  const issuedAt = Date.now();
+  const nonce = crypto.randomBytes(16).toString('hex');
+  const payload = `${username}:${issuedAt}:${nonce}`;
+  const signature = crypto.createHmac('sha256', AUTH_TOKEN_SECRET)
+    .update(payload)
+    .digest('hex');
+  return Buffer.from(`${payload}:${signature}`)
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+}
+
+function normalizeCountryKey(val) {
+  return String(val || '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function normalizeCountry(val) {
+  if (!val) return '';
+  const key = normalizeCountryKey(val);
+  if (COUNTRY_ALIAS_MAP[key]) return COUNTRY_ALIAS_MAP[key];
+  if (ALLOWED_COUNTRY_SET.has(key)) return key;
+  return '';
 }
 
 
@@ -483,7 +620,7 @@ app.get('/api/attraction-image/:country/:id/:index', async (req, res) => {
 
   try {
     const params = {
-      Bucket: 'travelplacesbucketjapan',
+      Bucket: DATA_BUCKET,
       Key: imageKey,
     };
     const data = await s3.getObject(params).promise();
@@ -636,38 +773,110 @@ app.post('/api/attractions-geo/:country/by-ids', async (req, res) => {
   }
 });
 
-// 用户注册路由
-/*app.post('/register', async (req, res) => {
-  const { username, password } = req.body;
+// 用户注册路由（用户数据存 S3）
+app.post(['/register', '/api/register'], async (req, res) => {
+  const {
+    username,
+    password,
+    confirmPassword,
+    name = '',
+    country = '',
+    company = '',
+    address = '',
+    mobile = '',
+    email = ''
+  } = req.body || {};
 
-  const existingUser = await User.findOne({ username });
-  if (existingUser) {
-    return res.status(400).json({ msg: '用户已存在' });
+  if (!username || !password) {
+    return res.status(400).json({ msg: '用户名和密码为必填项' });
   }
 
-  const salt = await bcrypt.genSalt(10);
-  const hashedPassword = await bcrypt.hash(password, salt);
+  if (confirmPassword !== undefined && password !== confirmPassword) {
+    return res.status(400).json({ msg: '两次输入的密码不一致' });
+  }
 
-  const newUser = new User({ username, password: hashedPassword });
-  await newUser.save();
-  res.status(201).json({ msg: '用户注册成功' });
+  const normalizedCountry = normalizeCountry(country);
+  if (!normalizedCountry) {
+    return res.status(400).json({ msg: '国家不在允许列表' });
+  }
+
+  try {
+    const existing = await getUserFromS3(username);
+    if (existing) {
+      return res.status(409).json({ msg: '用户已存在' });
+    }
+
+    const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+    const now = new Date().toISOString();
+    const userRecord = {
+      username,
+      passwordHash,
+      name,
+      country: normalizedCountry,
+      company,
+      address,
+      mobile,
+      email,
+      createdAt: now,
+      updatedAt: now
+    };
+
+    await saveUserToS3(userRecord);
+
+    const token = createSessionToken(username);
+    const safeUser = {
+      username,
+      name: name || username,
+      country: normalizedCountry,
+      company,
+      address,
+      mobile,
+      email
+    };
+
+    return res.status(201).json({ msg: '注册成功', token, user: safeUser });
+  } catch (error) {
+    console.error('注册失败:', error.message || error);
+    return res.status(500).json({ msg: '注册失败，请稍后重试' });
+  }
 });
 
-// 用户登录路由
-app.post('/login', async (req, res) => {
-  const { username, password } = req.body;
+// 用户登录路由（从 S3 校验）
+app.post(['/login', '/api/login'], async (req, res) => {
+  const { username, password } = req.body || {};
 
-  const user = await User.findOne({ username });
-  if (!user) {
-    return res.status(400).json({ msg: '无效的凭证' });
+  if (!username || !password) {
+    return res.status(400).json({ msg: '请提供用户名和密码' });
   }
 
-  const isMatch = await bcrypt.compare(password, user.password);
-  if (!isMatch) {
-    return res.status(400).json({ msg: '无效的凭证' });
-  }
+  try {
+    const user = await getUserFromS3(username);
+    if (!user) {
+      return res.status(400).json({ msg: '用户名或密码错误' });
+    }
 
-  res.status(200).json({ msg: '登录成功' });
-});*/
+    const hash = user.passwordHash || user.password;
+    const match = hash ? await bcrypt.compare(password, hash) : false;
+    if (!match) {
+      return res.status(400).json({ msg: '用户名或密码错误' });
+    }
+
+    const token = createSessionToken(username);
+    const safeUser = {
+      username,
+      name: user.name || username,
+      country: user.country || '',
+      company: user.company || '',
+      address: user.address || '',
+      mobile: user.mobile || '',
+      email: user.email || ''
+    };
+
+    return res.status(200).json({ msg: '登录成功', token, user: safeUser });
+  } catch (error) {
+    console.error('登录失败:', error.message || error);
+    return res.status(500).json({ msg: '登录失败，请稍后重试' });
+  }
+});
 
 app.listen(PORT, () => { console.log(`服务器正在端口 ${host}:${PORT} 上运行`); });
