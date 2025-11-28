@@ -22,6 +22,17 @@ const USER_PREFIX = process.env.AWS_USER_PREFIX || 'users/';
 const AUTH_TOKEN_SECRET = process.env.AUTH_TOKEN_SECRET || process.env.API_KEY || 'travelplaces-secret';
 const BCRYPT_ROUNDS = parseInt(process.env.BCRYPT_ROUNDS || '10', 10);
 const SESSION_TTL_MS = parseInt(process.env.SESSION_TTL_MS || `${30 * 24 * 60 * 60 * 1000}`, 10); // default 30 days
+
+function loadGeoKeys() {
+  return {
+    amapKey: process.env.AMAP_KEY || process.env.VITE_AMAP_KEY || '',
+    openCageKey: process.env.OPENCAGE_KEY || process.env.VITE_OPENCAGE_KEY || '',
+    geoapifyKey: process.env.GEOAPIFY_KEY || process.env.VITE_GEOAPIFY_KEY || '',
+    locationIqKey: process.env.LOCATIONIQ_KEY || process.env.VITE_LOCATIONIQ_KEY || '',
+    mapQuestKey: process.env.MAPQUEST_KEY || process.env.VITE_MAPQUEST_KEY || '',
+    positionstackKey: process.env.POSITIONSTACK_KEY || process.env.VITE_POSITIONSTACK_KEY || ''
+  };
+}
 const COUNTRY_TRANSLATIONS = {
   'afghanistan': '阿富汗', 'albania': '阿尔巴尼亚', 'algeria': '阿尔及利亚', 'andorra': '安道尔', 'angola': '安哥拉',
   'antigua and barbuda': '安提瓜和巴布达', 'argentina': '阿根廷', 'armenia': '亚美尼亚', 'australia': '澳大利亚',
@@ -192,6 +203,22 @@ app.use(cors({
 
 // API key 或登录 token 任一通过即可（登录/注册跳过）
 app.use('/api', requireApiKeyOrAuthToken);
+
+// Geo API keys 提供给前端（已受 API key / token 保护）
+app.get('/api/geo-keys', (req, res) => {
+  const keys = loadGeoKeys();
+  try {
+    console.info('[GeoKeys][server] send', {
+      hasAmapKey: !!keys.amapKey,
+      hasOpenCageKey: !!keys.openCageKey,
+      hasGeoapifyKey: !!keys.geoapifyKey,
+      hasLocationIqKey: !!keys.locationIqKey,
+      hasMapQuestKey: !!keys.mapQuestKey,
+      hasPositionstackKey: !!keys.positionstackKey
+    });
+  } catch (_) {}
+  res.json(keys);
+});
 
 // 辅助函数：连接到正确的数据库
 async function connectToDatabase(country) {
