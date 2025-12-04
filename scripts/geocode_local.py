@@ -557,6 +557,12 @@ def build_queries(position: Optional[str], name, region, county, country):
         other_queries.append(f"{strip_noise(name)} {strip_noise(country)}")
     if name and region:
         other_queries.append(f"{strip_noise(name)} {strip_noise(region)} {strip_noise(country or '')}")
+    # 新增：name + region
+    if name and region:
+        other_queries.append(f"{strip_noise(name)} {strip_noise(region)}")
+    # 新增：单独 name
+    if name:
+        other_queries.append(strip_noise(name))
 
     # 去重
     seen = set()
@@ -696,6 +702,10 @@ def main():
                 if pos_len < skip_limit:
                     print(f"  [Position Query] length<{skip_limit} (CJK ratio={pos_cjk_ratio:.2f}), skip position stage: {pos_query}")
                 else:
+                    # CJK 比例较低且长度较长时，去掉 position 中的中文再做地理编码
+                    if pos_cjk_ratio < 0.5 and pos_len >= 30:
+                        pos_query = re.sub(r"[\u4e00-\u9fff]+", " ", pos_query)
+                        pos_query = re.sub(r"\s+", " ", pos_query).strip()
                     print(f"  -- [Position Query] {pos_query}")
 
                     for api_name, api_func in ALL_APIS:  # 包含 key + 非 key
@@ -775,6 +785,21 @@ def main():
                         cluster_info.append((qv, best_group, center_qv, valid_count))
 
             # 是否有词条形成聚类
+            if not cluster_info and len(other_only) >= 5:
+                merged_groups = group_coordinates(other_only, threshold_km=20.0)
+                if merged_groups:
+                    merged_groups_sorted = sorted(merged_groups, key=lambda g: -len(g))
+                    best_merged_group = merged_groups_sorted[0]
+
+                    if len(best_merged_group) >= 5 and has_real_cluster_single_query(best_merged_group, 20.0):
+                        merged_count = len(best_merged_group)
+                        avg_lat = sum(c[0] for c in best_merged_group) / merged_count
+                        avg_lng = sum(c[1] for c in best_merged_group) / merged_count
+                        merged_center = (avg_lat, avg_lng)
+                        merged_qv = other_queries[0] if other_queries else "__merged_all__"
+                        cluster_info.append((merged_qv, best_merged_group, merged_center, merged_count))
+                        print(f"  [Merged Cluster] use all other_queries cluster, size={merged_count}")
+
             has_cluster_other = len(cluster_info) > 0
 
             # 🔍 选择最终词条：
