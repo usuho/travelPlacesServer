@@ -122,6 +122,30 @@ function getLocalIPAddress() {
   return '0.0.0.0';
 }
 
+function getClientIp(req) {
+  try {
+    const xff = req.headers && req.headers['x-forwarded-for'];
+    if (typeof xff === 'string' && xff.length > 0) {
+      const parts = xff.split(',').map(s => s.trim()).filter(Boolean);
+      if (parts.length > 0) {
+        return parts[0];
+      }
+    }
+    const rawIp =
+      (req.ip) ||
+      (req.connection && req.connection.remoteAddress) ||
+      (req.socket && req.socket.remoteAddress) ||
+      (req.connection && req.connection.socket && req.connection.socket.remoteAddress) ||
+      '';
+    if (typeof rawIp === 'string' && rawIp.startsWith('::ffff:')) {
+      return rawIp.slice(7);
+    }
+    return rawIp || '';
+  } catch (_) {
+    return '';
+  }
+}
+
 const host = getLocalIPAddress();
 
 app.get('/api/ip', (req, res) => {
@@ -881,6 +905,10 @@ app.post(['/register', '/api/register'], async (req, res) => {
     mobile = '',
     email = ''
   } = req.body || {};
+  const clientIp = getClientIp(req);
+  const userAgent = req.get && req.get('user-agent')
+    ? req.get('user-agent')
+    : (req.headers && req.headers['user-agent']) || '';
 
   if (!username || !password) {
     return res.status(400).json({ msg: '用户名和密码为必填项' });
@@ -912,6 +940,8 @@ app.post(['/register', '/api/register'], async (req, res) => {
       address,
       mobile,
       email,
+      registrationIp: clientIp,
+      registrationUserAgent: userAgent,
       createdAt: now,
       updatedAt: now
     };
