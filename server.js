@@ -22,6 +22,13 @@ const USER_PREFIX = process.env.AWS_USER_PREFIX || 'users/';
 const AUTH_TOKEN_SECRET = process.env.AUTH_TOKEN_SECRET || process.env.API_KEY || 'travelplaces-secret';
 const BCRYPT_ROUNDS = parseInt(process.env.BCRYPT_ROUNDS || '10', 10);
 const SESSION_TTL_MS = parseInt(process.env.SESSION_TTL_MS || `${30 * 24 * 60 * 60 * 1000}`, 10); // default 30 days
+const REGISTER_INVITE_CODE = process.env.REGISTER_INVITE_CODE || process.env.INVITE_CODE || '';
+
+// 启动时打印一下邀请码环境变量是否存在，便于排查部署问题（不打印具体值）
+try {
+  console.info('[env] REGISTER_INVITE_CODE set:', !!REGISTER_INVITE_CODE, 'INVITE_CODE set:', !!process.env.INVITE_CODE);
+} catch (_) {}
+
 
 function loadGeoKeys() {
   return {
@@ -898,6 +905,7 @@ app.post(['/register', '/api/register'], async (req, res) => {
     username,
     password,
     confirmPassword,
+    inviteCode,
     name = '',
     country = '',
     company = '',
@@ -912,6 +920,14 @@ app.post(['/register', '/api/register'], async (req, res) => {
 
   if (!username || !password) {
     return res.status(400).json({ msg: '用户名和密码为必填项' });
+  }
+
+  if (!inviteCode) {
+    return res.status(400).json({ msg: '邀请码为必填项' });
+  }
+
+  if (REGISTER_INVITE_CODE && inviteCode !== REGISTER_INVITE_CODE) {
+    return res.status(400).json({ msg: '邀请码不正确' });
   }
 
   if (confirmPassword !== undefined && password !== confirmPassword) {
