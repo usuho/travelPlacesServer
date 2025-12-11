@@ -327,6 +327,39 @@ async function getUserFromS3(username) {
   }
 }
 
+// 列出所有用户（用于邮箱/手机号匹配登录）
+async function listAllUsersFromS3() {
+  const prefix = USER_PREFIX.endsWith('/') ? USER_PREFIX : `${USER_PREFIX}/`;
+  const users = [];
+  let ContinuationToken = undefined;
+  try {
+    do {
+      const resp = await s3.listObjectsV2({
+        Bucket: USER_BUCKET,
+        Prefix: prefix,
+        ContinuationToken
+      }).promise();
+      const contents = Array.isArray(resp.Contents) ? resp.Contents : [];
+      for (const item of contents) {
+        const key = item.Key;
+        if (!key || !key.endsWith('.json')) continue;
+        try {
+          const obj = await s3.getObject({ Bucket: USER_BUCKET, Key: key }).promise();
+          const body = obj.Body ? obj.Body.toString('utf-8') : '';
+          if (body) users.push(JSON.parse(body));
+        } catch (err) {
+          console.error('读取用户列表项失败:', key, err && err.message ? err.message : err);
+        }
+      }
+      ContinuationToken = resp.IsTruncated ? resp.NextContinuationToken : undefined;
+    } while (ContinuationToken);
+  } catch (err) {
+    console.error('列出用户失败:', err && err.message ? err.message : err);
+    return [];
+  }
+  return users;
+}
+
 async function saveUserToS3(userItem) {
   const Key = getUserKey(userItem.username);
   const body = JSON.stringify(userItem);
@@ -952,30 +985,30 @@ app.post(['/register', '/api/register'], async (req, res) => {
       passwordHash,
       name,
       country: normalizedCountry,
-      company,
-      address,
-      mobile,
-      email,
-      registrationIp: clientIp,
-      registrationUserAgent: userAgent,
-      createdAt: now,
-      updatedAt: now
-    };
+    company,
+    address,
+    mobile,
+    email,
+    registrationIp: clientIp,
+    registrationUserAgent: userAgent,
+    createdAt: now,
+    updatedAt: now
+  };
 
-    await saveUserToS3(userRecord);
+  await saveUserToS3(userRecord);
 
-    const token = createSessionToken(username);
+  const token = createSessionToken(username);
     const safeUser = {
       username,
       name: name || username,
       country: normalizedCountry,
       company,
       address,
-      mobile,
-      email
-    };
+    mobile,
+    email
+  };
 
-    return res.status(201).json({ msg: '注册成功', token, user: safeUser });
+  return res.status(201).json({ msg: '注册成功', token, user: safeUser });
   } catch (error) {
     console.error('注册失败:', error.message || error);
     return res.status(500).json({ msg: '注册失败，请稍后重试' });
@@ -984,14 +1017,76 @@ app.post(['/register', '/api/register'], async (req, res) => {
 
 // 用户登录路由（从 S3 校验）
 app.post(['/login', '/api/login'], async (req, res) => {
-  const { username, password } = req.body || {};
+  const { username: rawIdentifier, password } = req.body || {};
+  const identifier = (rawIdentifier || '').toString().trim();
+  const identifierLower = identifier.toLowerCase();
+  const plainDigits = identifier.replace(/[^\d]/g, '');
 
-  if (!username || !password) {
+  if (!identifier || !password) {
     return res.status(400).json({ msg: '请提供用户名和密码' });
   }
 
   try {
-    const user = await getUserFromS3(username);
+    let user = await getUserFromS3(identifier);
+    let loginUsername = identifier;
+
+    // 如果按用户名找不到，则尝试按邮箱或手机号匹配，或大小写不一致的用户名
+    if (!user) {
+      const allUsers = await listAllUsersFromS3();
+      const mobileExactMatches = [];
+      const mobileSuffixMatches = [];
+
+      for (const u of allUsers) {
+        if (!u) continue;
+        const uUsername = (u.username || '').toString();
+        const uUsernameLower = uUsername.toLowerCase();
+
+        // 0) 用户名大小写不敏感匹配
+        if (uUsernameLower && uUsernameLower === identifierLower) {
+          user = u;
+          loginUsername = uUsername || identifier;
+          break;
+        }
+
+        // 1) 邮箱精确匹配（不区分大小写）
+        const email = (u.email || '').toString().trim().toLowerCase();
+        if (email && identifierLower && email === identifierLower) {
+          user = u;
+          loginUsername = uUsername || identifier;
+          break;
+        }
+
+        // 2) 手机号匹配
+        const mobileRaw = (u.mobile || '').toString();
+        const mobileDigits = mobileRaw.replace(/[^\d]/g, '');
+        if (plainDigits && mobileDigits) {
+          // 优先完全相等（去掉+等符号）
+          if (mobileDigits === plainDigits) {
+            mobileExactMatches.push({ user: u, loginUsername: uUsername || identifier });
+            continue;
+          }
+          // 次优：结尾一致（去掉国家码），可能存在歧义
+          if (mobileDigits.length >= plainDigits.length && mobileDigits.endsWith(plainDigits)) {
+            mobileSuffixMatches.push({ user: u, loginUsername: uUsername || identifier });
+          }
+        }
+      }
+
+      if (!user) {
+        if (mobileExactMatches.length >= 1) {
+          const pick = mobileExactMatches[0];
+          user = pick.user;
+          loginUsername = pick.loginUsername;
+        } else if (mobileSuffixMatches.length === 1) {
+          const pick = mobileSuffixMatches[0];
+          user = pick.user;
+          loginUsername = pick.loginUsername;
+        } else if (mobileSuffixMatches.length > 1) {
+          return res.status(400).json({ msg: '手机号不唯一，请输入完整含国家码的手机号或使用邮箱/用户名登录' });
+        }
+      }
+    }
+
     if (!user) {
       return res.status(400).json({ msg: '用户名或密码错误' });
     }
@@ -1002,10 +1097,10 @@ app.post(['/login', '/api/login'], async (req, res) => {
       return res.status(400).json({ msg: '用户名或密码错误' });
     }
 
-    const token = createSessionToken(username);
+    const token = createSessionToken(loginUsername);
     const safeUser = {
-      username,
-      name: user.name || username,
+      username: loginUsername,
+      name: user.name || loginUsername,
       country: user.country || '',
       company: user.company || '',
       address: user.address || '',
