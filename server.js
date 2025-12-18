@@ -1246,6 +1246,7 @@ app.post(['/login', '/api/login'], async (req, res) => {
     // 如果按用户名找不到，则尝试按邮箱或手机号匹配，或大小写不一致的用户名
     if (!user) {
       const allUsers = await listAllUsersFromS3();
+      const emailMatches = [];
       const mobileExactMatches = [];
       const mobileSuffixMatches = [];
 
@@ -1264,9 +1265,8 @@ app.post(['/login', '/api/login'], async (req, res) => {
         // 1) 邮箱精确匹配（不区分大小写）
         const email = (u.email || '').toString().trim().toLowerCase();
         if (email && identifierLower && email === identifierLower) {
-          user = u;
-          loginUsername = uUsername || identifier;
-          break;
+          emailMatches.push({ user: u, loginUsername: uUsername || identifier });
+          continue;
         }
 
         // 2) 手机号匹配
@@ -1282,6 +1282,16 @@ app.post(['/login', '/api/login'], async (req, res) => {
           if (mobileDigits.length >= plainDigits.length && mobileDigits.endsWith(plainDigits)) {
             mobileSuffixMatches.push({ user: u, loginUsername: uUsername || identifier });
           }
+        }
+      }
+
+      if (!user) {
+        if (emailMatches.length === 1) {
+          const pick = emailMatches[0];
+          user = pick.user;
+          loginUsername = pick.loginUsername;
+        } else if (emailMatches.length > 1) {
+          return res.status(400).json({ msg: '邮箱不唯一，请使用用户名或手机号登录' });
         }
       }
 
