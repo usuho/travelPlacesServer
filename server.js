@@ -23,6 +23,7 @@ const AUTH_TOKEN_SECRET = process.env.AUTH_TOKEN_SECRET || process.env.API_KEY |
 const BCRYPT_ROUNDS = parseInt(process.env.BCRYPT_ROUNDS || '10', 10);
 const SESSION_TTL_MS = parseInt(process.env.SESSION_TTL_MS || `${30 * 24 * 60 * 60 * 1000}`, 10); // default 30 days
 const REGISTER_INVITE_CODE = process.env.REGISTER_INVITE_CODE || process.env.INVITE_CODE || '';
+const ACTIVE_SESSIONS = new Map(); // 单设备登录：username -> token
 
 // 启动时打印一下邀请码环境变量是否存在，便于排查部署问题（不打印具体值）
 try {
@@ -225,7 +226,7 @@ const s3 = new AWS.S3({
 });
 
 // 中间件
-app.use(bodyParser.json());
+app.use(bodyParser.json({ limit: '15mb' }));
 app.use(cors({
   methods: 'GET,HEAD,PUT,PATCH,POST,DELETE',
   credentials: true,
@@ -372,6 +373,74 @@ async function saveUserToS3(userItem) {
   }).promise();
 }
 
+function sanitizeUserForClient(userItem) {
+  if (!userItem) return null;
+  const {
+    password,
+    passwordHash,
+    registrationIp,
+    registrationUserAgent,
+    ...rest
+  } = userItem;
+  return rest;
+}
+
+function ensureUserDataShape(userItem) {
+  const shaped = userItem || {};
+  if (!Array.isArray(shaped.favoriteTabs)) shaped.favoriteTabs = [];
+  if (!Array.isArray(shaped.customAttractions)) shaped.customAttractions = [];
+  if (typeof shaped.favoriteTabsActiveId !== 'string') shaped.favoriteTabsActiveId = '';
+  return shaped;
+}
+
+function getUserFolderKey(username) {
+  const prefix = USER_PREFIX.endsWith('/') ? USER_PREFIX : `${USER_PREFIX}/`;
+  return `${prefix}${encodeURIComponent(String(username))}/`;
+}
+
+function buildCustomImageKey(username, customId, slot, extHint) {
+  const folder = getUserFolderKey(username);
+  const safeId = encodeURIComponent(String(customId || 'custom'));
+  const safeSlot = ['main', 'sec0', 'sec1'].includes(slot) ? slot : 'main';
+  const ext = (extHint || 'jpg').replace(/[^a-z0-9]/gi, '') || 'jpg';
+  return `${folder}${safeId}/${safeSlot}.${ext}`;
+}
+
+function mimeToExt(mime) {
+  const map = {
+    'image/png': 'png',
+    'image/jpeg': 'jpg',
+    'image/jpg': 'jpg',
+    'image/webp': 'webp',
+    'image/gif': 'gif'
+  };
+  return map[mime] || 'bin';
+}
+
+function parseBase64Image(dataUrl) {
+  if (!dataUrl || typeof dataUrl !== 'string') return null;
+  const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+  if (match) {
+    try {
+      return { mime: match[1] || 'application/octet-stream', buffer: Buffer.from(match[2], 'base64') };
+    } catch (_) {
+      return null;
+    }
+  }
+  // fallback: treat as pure base64
+  try {
+    return { mime: 'application/octet-stream', buffer: Buffer.from(dataUrl, 'base64') };
+  } catch (_) {
+    return null;
+  }
+}
+
+function isValidUserAssetKey(username, key) {
+  if (!username || !key) return false;
+  const folder = getUserFolderKey(username);
+  return String(key).startsWith(folder);
+}
+
 function createSessionToken(username) {
   const issuedAt = Date.now();
   const nonce = crypto.randomBytes(16).toString('hex');
@@ -384,6 +453,11 @@ function createSessionToken(username) {
     .replace(/\+/g, '-')
     .replace(/\//g, '_')
     .replace(/=+$/, '');
+}
+
+function setActiveSession(username, token) {
+  if (!username || !token) return;
+  ACTIVE_SESSIONS.set(username, token);
 }
 
 function verifySessionToken(token) {
@@ -401,6 +475,9 @@ function verifySessionToken(token) {
       .update(payload)
       .digest('hex');
     if (expected !== signature) return null;
+    // 单设备校验：仅允许当前活动 token
+    const active = ACTIVE_SESSIONS.get(username);
+    if (!active || active !== token) return null;
     const issuedAt = Number(issuedAtStr);
     if (!Number.isFinite(issuedAt)) return null;
     if (SESSION_TTL_MS > 0 && Date.now() - issuedAt > SESSION_TTL_MS) {
@@ -932,6 +1009,138 @@ app.post('/api/attractions-geo/:country/by-ids', async (req, res) => {
   }
 });
 
+// 用户数据（包括收藏和自创景点）读写
+app.get('/api/user/data', async (req, res) => {
+  const username = req.user && req.user.username;
+  if (!username) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const raw = await getUserFromS3(username) || { username };
+    const shaped = ensureUserDataShape({ ...raw, username });
+    const safeUser = sanitizeUserForClient(shaped);
+    return res.json({
+      user: safeUser,
+      favoriteTabs: shaped.favoriteTabs,
+      favoriteTabsActiveId: shaped.favoriteTabsActiveId,
+      customAttractions: shaped.customAttractions,
+      updatedAt: shaped.updatedAt || null
+    });
+  } catch (err) {
+    console.error('获取用户数据失败:', err && err.message ? err.message : err);
+    return res.status(500).json({ error: 'Failed to load user data' });
+  }
+});
+
+app.put('/api/user/data', async (req, res) => {
+  const username = req.user && req.user.username;
+  if (!username) return res.status(401).json({ error: 'Unauthorized' });
+
+  try {
+    const existing = await getUserFromS3(username) || { username };
+    const shaped = ensureUserDataShape({ ...existing, username });
+    const favoriteTabs = Array.isArray(req.body.favoriteTabs) ? req.body.favoriteTabs : shaped.favoriteTabs;
+    const favoriteTabsActiveId = typeof req.body.favoriteTabsActiveId === 'string'
+      ? req.body.favoriteTabsActiveId
+      : shaped.favoriteTabsActiveId || '';
+    const customAttractions = Array.isArray(req.body.customAttractions)
+      ? req.body.customAttractions
+      : shaped.customAttractions;
+
+    const next = {
+      ...shaped,
+      favoriteTabs,
+      favoriteTabsActiveId,
+      customAttractions,
+      updatedAt: new Date().toISOString()
+    };
+    await saveUserToS3(next);
+    return res.json({ ok: true, user: sanitizeUserForClient(next) });
+  } catch (err) {
+    console.error('保存用户数据失败:', err && err.message ? err.message : err);
+    return res.status(500).json({ error: 'Failed to save user data' });
+  }
+});
+
+// 自创景点图片上传和读取
+app.post('/api/user/custom-image', async (req, res) => {
+  const username = req.user && req.user.username;
+  if (!username) return res.status(401).json({ error: 'Unauthorized' });
+  const { customId, slot, dataUrl } = req.body || {};
+  if (!customId || !slot || !dataUrl) {
+    return res.status(400).json({ error: 'customId, slot and dataUrl are required' });
+  }
+  const parsed = parseBase64Image(dataUrl);
+  if (!parsed || !parsed.buffer || !parsed.buffer.length) {
+    return res.status(400).json({ error: 'Invalid image payload' });
+  }
+  const ext = mimeToExt(parsed.mime);
+  const Key = buildCustomImageKey(username, customId, slot, ext);
+  try {
+    await s3.putObject({
+      Bucket: USER_BUCKET,
+      Key,
+      Body: parsed.buffer,
+      ContentType: parsed.mime || 'application/octet-stream',
+      CacheControl: 'public, max-age=31536000',
+      ACL: 'private'
+    }).promise();
+    return res.json({ key: Key, contentType: parsed.mime || 'application/octet-stream', size: parsed.buffer.length });
+  } catch (err) {
+    console.error('上传自创图片失败:', err && err.message ? err.message : err);
+    return res.status(500).json({ error: 'Failed to upload image' });
+  }
+});
+
+app.get('/api/user/custom-image', async (req, res) => {
+  const username = req.user && req.user.username;
+  if (!username) return res.status(401).json({ error: 'Unauthorized' });
+  const key = req.query && req.query.key ? String(req.query.key) : '';
+  if (!key || !isValidUserAssetKey(username, key)) {
+    return res.status(400).json({ error: 'Invalid image key' });
+  }
+  try {
+    const obj = await s3.getObject({ Bucket: USER_BUCKET, Key: key }).promise();
+    res.setHeader('Content-Type', obj.ContentType || 'application/octet-stream');
+    // 图片会被替换，防止老缓存被继续使用
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate, private');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    return res.send(obj.Body);
+  } catch (err) {
+    const code = err && err.code ? err.code : '';
+    const status = (err && err.statusCode) || (code === 'NoSuchKey' ? 404 : 500);
+    if (status === 404) return res.status(404).json({ error: 'Image not found' });
+    console.error('读取自创图片失败:', err && err.message ? err.message : err);
+    return res.status(500).json({ error: 'Failed to load image' });
+  }
+});
+
+// 删除用户自创图片（支持批量）
+app.delete('/api/user/custom-image', async (req, res) => {
+  const username = req.user && req.user.username;
+  if (!username) return res.status(401).json({ error: 'Unauthorized' });
+  const keys = [];
+  if (Array.isArray(req.body && req.body.keys)) {
+    req.body.keys.forEach(k => { if (k) keys.push(String(k)); });
+  } else if (req.body && req.body.key) {
+    keys.push(String(req.body.key));
+  }
+  const validKeys = keys.filter(k => isValidUserAssetKey(username, k));
+  if (!validKeys.length) {
+    return res.json({ deleted: 0 });
+  }
+  try {
+    const resp = await s3.deleteObjects({
+      Bucket: USER_BUCKET,
+      Delete: { Objects: validKeys.map(Key => ({ Key })) }
+    }).promise();
+    const deleted = Array.isArray(resp.Deleted) ? resp.Deleted.length : validKeys.length;
+    return res.json({ deleted });
+  } catch (err) {
+    console.error('删除自创图片失败:', err && err.message ? err.message : err);
+    return res.status(500).json({ error: 'Failed to delete images' });
+  }
+});
+
 // 用户注册路由（用户数据存 S3）
 app.post(['/register', '/api/register'], async (req, res) => {
   const {
@@ -985,24 +1194,28 @@ app.post(['/register', '/api/register'], async (req, res) => {
       passwordHash,
       name,
       country: normalizedCountry,
-    company,
-    address,
-    mobile,
-    email,
-    registrationIp: clientIp,
-    registrationUserAgent: userAgent,
-    createdAt: now,
-    updatedAt: now
-  };
+      company,
+      address,
+      mobile,
+      email,
+      favoriteTabs: [],
+      favoriteTabsActiveId: '',
+      customAttractions: [],
+      registrationIp: clientIp,
+      registrationUserAgent: userAgent,
+      createdAt: now,
+      updatedAt: now
+    };
 
   await saveUserToS3(userRecord);
 
   const token = createSessionToken(username);
-    const safeUser = {
-      username,
-      name: name || username,
-      country: normalizedCountry,
-      company,
+  setActiveSession(username, token);
+  const safeUser = {
+    username,
+    name: name || username,
+    country: normalizedCountry,
+    company,
       address,
     mobile,
     email
@@ -1098,6 +1311,7 @@ app.post(['/login', '/api/login'], async (req, res) => {
     }
 
     const token = createSessionToken(loginUsername);
+    setActiveSession(loginUsername, token);
     const safeUser = {
       username: loginUsername,
       name: user.name || loginUsername,
