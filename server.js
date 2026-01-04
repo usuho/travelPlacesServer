@@ -438,7 +438,23 @@ function parseBase64Image(dataUrl) {
 function isValidUserAssetKey(username, key) {
   if (!username || !key) return false;
   const folder = getUserFolderKey(username);
-  return String(key).startsWith(folder);
+  // 允许访问当前用户的资源
+  if (String(key).startsWith(folder)) return true;
+  // 也允许访问其他用户的资源（用于导入场景，只要格式正确）
+  // 格式应该是: users/{username}/custom_xxx/{slot}.{ext}
+  const keyStr = String(key);
+  const prefix = USER_PREFIX.endsWith('/') ? USER_PREFIX : `${USER_PREFIX}/`;
+  if (keyStr.startsWith(prefix)) {
+    // 验证格式：users/{username}/custom_xxx/{slot}.{ext}
+    const parts = keyStr.slice(prefix.length).split('/');
+    if (parts.length >= 3 && parts[0] && parts[1] && parts[2]) {
+      const slot = parts[2].split('.')[0];
+      if (['main', 'sec0', 'sec1'].includes(slot)) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 function createSessionToken(username) {
