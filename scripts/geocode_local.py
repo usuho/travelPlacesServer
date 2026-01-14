@@ -212,7 +212,8 @@ def geocode_google(query: str, *, country: Optional[str], api_key: str) -> Optio
     params = {"address": query, "key": api_key}
     # Optional country component (e.g., us/jp/cn or full name)
     if country:
-        params["components"] = f"country:{country}"
+        country_code = get_country_code(country)
+        params["components"] = f"country:{country_code}"
     try:
         r = requests.get(url, params=params, timeout=15)
         if r.status_code != 200:
@@ -233,6 +234,35 @@ def geocode_google(query: str, *, country: Optional[str], api_key: str) -> Optio
 
 # ---------- Enhancements: additional providers and strategies ----------
 
+# 国家名称到ISO 3166-1 alpha-2代码的映射
+COUNTRY_TO_ISO = {
+    "japan": "jp",
+    "china": "cn",
+    "usa": "us",
+    "united states": "us",
+    "united states of america": "us",
+    "uk": "gb",
+    "united kingdom": "gb",
+    "great britain": "gb",
+    "south korea": "kr",
+    "korea": "kr",
+    "north korea": "kp",
+}
+
+def get_country_code(country: str) -> str:
+    """将国家名称转换为ISO 3166-1 alpha-2代码"""
+    if not country:
+        return ""
+    country_lower = country.lower().strip()
+    # 如果已经是2位代码，直接返回
+    if len(country_lower) == 2:
+        return country_lower
+    # 查找映射表
+    if country_lower in COUNTRY_TO_ISO:
+        return COUNTRY_TO_ISO[country_lower]
+    # 如果没有映射，尝试取前2位（向后兼容）
+    return country_lower[:2]
+
 COUNTRY_BBOX = {
     "cn": (73.5, 18.0, 134.8, 53.6),
     "china": (73.5, 18.0, 134.8, 53.6),
@@ -247,7 +277,7 @@ def geocode_nominatim_scoped(query: str, country: str = "", lang: str = "zh-CN,z
     url = "https://nominatim.openstreetmap.org/search"
     params = {"format": "json", "q": query, "limit": 1}
     if country:
-        params["countrycodes"] = country.lower()[:2]
+        params["countrycodes"] = get_country_code(country)
         if country.lower() in COUNTRY_BBOX:
             minx, miny, maxx, maxy = COUNTRY_BBOX[country.lower()]
             params["viewbox"] = f"{minx},{maxy},{maxx},{miny}"
@@ -317,7 +347,7 @@ def geocode_opencage(query: str, key: str, country: Optional[str]) -> Optional[T
     url = "https://api.opencagedata.com/geocode/v1/json"
     params = {"q": query, "key": key, "limit": 1}
     if country:
-        params["countrycode"] = country.lower()[:2]
+        params["countrycode"] = get_country_code(country)
     try:
         r = requests.get(url, params=params, timeout=15)
         if r.status_code != 200:
@@ -339,7 +369,7 @@ def geocode_geoapify(query: str, key: str, country: Optional[str]) -> Optional[T
     url = "https://api.geoapify.com/v1/geocode/search"
     params = {"text": query, "limit": 1, "apiKey": key}
     if country:
-        params["filter"] = f"countrycode:{country.lower()[:2]}"
+        params["filter"] = f"countrycode:{get_country_code(country)}"
     try:
         r = requests.get(url, params=params, timeout=15)
         if r.status_code != 200:
@@ -361,7 +391,7 @@ def geocode_locationiq(query: str, key: str, country: Optional[str]) -> Optional
     url = "https://us1.locationiq.com/v1/search"
     params = {"q": query, "key": key, "format": "json", "limit": 1}
     if country:
-        params["countrycodes"] = country.lower()[:2]
+        params["countrycodes"] = get_country_code(country)
     try:
         r = requests.get(url, params=params, timeout=15)
         if r.status_code != 200:
@@ -402,7 +432,8 @@ def geocode_positionstack(query: str, key: str, country: Optional[str]) -> Optio
     url = "http://api.positionstack.com/v1/forward"
     params = {"access_key": key, "query": query, "limit": 1}
     if country:
-        params["country"] = country
+        # Positionstack 接受 ISO 代码或完整国家名称，优先使用 ISO 代码
+        params["country"] = get_country_code(country)
     try:
         r = requests.get(url, params=params, timeout=15)
         if r.status_code != 200:
