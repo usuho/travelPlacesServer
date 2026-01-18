@@ -303,6 +303,89 @@ def geocode_nominatim_scoped(query: str, country: str = "", lang: str = "zh-CN,z
             delay *= 2
     return None
 
+import re
+
+def geocode_wikidata(query: str, country: str = "") -> Optional[Tuple[float, float]]:
+    headers = {
+        "User-Agent": "travelplaces-local/1.0"
+    }
+
+    def normalize(q: str) -> str:
+        # 去掉明显的描述性噪声
+        q = re.sub(r"about .*", "", q, flags=re.IGNORECASE)
+        q = re.sub(r"\b\d+\s*km\b", "", q, flags=re.IGNORECASE)
+        q = q.replace(",", " ")
+        q = re.sub(r"\s+", " ", q).strip()
+        return q
+
+    # 1️⃣ 构造“关键词退化列表”（从长到短）
+    base = normalize(query)
+
+    candidates = []
+    candidates.append(base)
+
+    # 拆词逐步缩短（非常关键）
+    parts = base.split()
+    if len(parts) > 3:
+        candidates.append(" ".join(parts[:3]))
+    if len(parts) > 2:
+        candidates.append(" ".join(parts[:2]))
+    if len(parts) > 1:
+        candidates.append(parts[0])
+
+    # 去重
+    candidates = list(dict.fromkeys(candidates))
+
+    for q in candidates:
+        try:
+            search_resp = requests.get(
+                "https://www.wikidata.org/w/api.php",
+                params={
+                    "action": "wbsearchentities",
+                    "search": q,
+                    "language": "en",
+                    "format": "json",
+                    "limit": 5,
+                },
+                headers=headers,
+                timeout=20,
+            )
+
+            if search_resp.status_code != 200:
+                continue
+
+            results = search_resp.json().get("search", [])
+            if not results:
+                continue
+
+            for item in results:
+                qid = item.get("id")
+                if not qid:
+                    continue
+
+                entity_resp = requests.get(
+                    f"https://www.wikidata.org/wiki/Special:EntityData/{qid}.json",
+                    headers=headers,
+                    timeout=20,
+                )
+                if entity_resp.status_code != 200:
+                    continue
+
+                entity = entity_resp.json()["entities"].get(qid, {})
+                claims = entity.get("claims", {})
+                coords = claims.get("P625")
+                if not coords:
+                    continue
+
+                coord = coords[0]["mainsnak"]["datavalue"]["value"]
+                return coord["latitude"], coord["longitude"]
+
+        except Exception:
+            continue
+
+    return None
+
+
 
 def geocode_photon(query: str, lang: str = "en") -> Optional[Tuple[float, float]]:
     # Photon by Komoot (no key). Keep rate modest.
@@ -655,6 +738,7 @@ def main():
         "geoapify",      # 更低优先级
         "locationiq",    # 更低优先级
         "positionstack"  # 最低优先级
+        "wikidata"       # 兜底
     ]
 
 
@@ -673,6 +757,7 @@ def main():
         ("geoapify", lambda q: geocode_geoapify(q, key_geoapify, args.country)) if key_geoapify else None,
         ("locationiq", lambda q: geocode_locationiq(q, key_locationiq, args.country)) if key_locationiq else None,
         ("positionstack", lambda q: geocode_positionstack(q, key_positionstack, args.country)) if key_positionstack else None,
+        ("wikidata", lambda q: geocode_wikidata(q, args.country)),
     ]
     # 去掉 None
     ALL_APIS = [item for item in ALL_APIS if item]
