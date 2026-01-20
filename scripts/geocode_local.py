@@ -737,7 +737,7 @@ def main():
         "opencage",      # 更低优先级
         "geoapify",      # 更低优先级
         "locationiq",    # 更低优先级
-        "positionstack"  # 最低优先级
+        "positionstack",  # 最低优先级
         "wikidata"       # 兜底
     ]
 
