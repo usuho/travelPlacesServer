@@ -24,6 +24,11 @@ const BCRYPT_ROUNDS = parseInt(process.env.BCRYPT_ROUNDS || '10', 10);
 const SESSION_TTL_MS = parseInt(process.env.SESSION_TTL_MS || `${30 * 24 * 60 * 60 * 1000}`, 10); // default 30 days
 const REGISTER_INVITE_CODE = process.env.REGISTER_INVITE_CODE || process.env.INVITE_CODE || '';
 const ACTIVE_SESSIONS = new Map(); // 单设备登录：username -> token
+const LOCAL_DATA_DIR = process.env.LOCAL_DATA_DIR || process.env.DATA_DIR || path.join(__dirname, 'scripts');
+const DB_CACHE = new Map();           // country -> resolved db path
+const GEO_CACHE = new Map();          // country -> { ts, data }
+const POS_CACHE = new Map();          // country -> { ts, data }
+const GEO_CACHE_TTL_MS = parseInt(process.env.GEO_CACHE_TTL_MS || `${5 * 60 * 1000}`, 10); // default 5 minutes
 
 // 启动时打印一下邀请码环境变量是否存在，便于排查部署问题（不打印具体值）
 try {
@@ -252,25 +257,78 @@ app.get('/api/geo-keys', (req, res) => {
   res.json(keys);
 });
 
-// 辅助函数：连接到正确的数据库
-async function connectToDatabase(country) {
+function getCacheEntry(cache, key) {
+  if (!cache || !cache.has(key)) return null;
+  const entry = cache.get(key);
+  if (!entry) return null;
+  if (Number.isFinite(GEO_CACHE_TTL_MS) && GEO_CACHE_TTL_MS > 0) {
+    if (!entry.ts || (Date.now() - entry.ts) > GEO_CACHE_TTL_MS) {
+      cache.delete(key);
+      return null;
+    }
+  }
+  return entry.data;
+}
+
+function setCacheEntry(cache, key, data) {
+  if (!cache || !key) return;
+  cache.set(key, { ts: Date.now(), data });
+}
+
+function resolveLocalDbPath(country) {
+  const key = normalizeCountryKey(country);
+  const candidates = [];
+  if (LOCAL_DATA_DIR) candidates.push(path.join(LOCAL_DATA_DIR, `${key}.db`));
+  candidates.push(path.join(__dirname, `${key}.db`));
+  candidates.push(path.join(__dirname, 'scripts', `${key}.db`));
+
+  for (const p of candidates) {
+    try {
+      if (fs.existsSync(p)) return p;
+    } catch (_) {}
+  }
+  return null;
+}
+
+async function ensureDbFile(country) {
+  const key = normalizeCountryKey(country);
+  if (!key) return null;
+
+  const cached = DB_CACHE.get(key);
+  if (cached && fs.existsSync(cached)) return cached;
+
+  const local = resolveLocalDbPath(key);
+  if (local) {
+    DB_CACHE.set(key, local);
+    return local;
+  }
+
   const params = {
     Bucket: DATA_BUCKET,
-    Key: `${country}.db`,
+    Key: `${key}.db`,
   };
 
   try {
     const data = await s3.getObject(params).promise();
-    if (!data.Body) {
-      throw new Error('S3 getObject response does not contain Body');
-    }
-
-    const dbPath = path.join(__dirname, `${country}.db`);
-    fs.writeFileSync(dbPath, data.Body);  // 确保只写入文件内容
-    const db = new sqlite3.Database(dbPath);
-    return db;
+    if (!data.Body) throw new Error('S3 getObject response does not contain Body');
+    const dbPath = path.join(__dirname, `${key}.db`);
+    fs.writeFileSync(dbPath, data.Body);
+    DB_CACHE.set(key, dbPath);
+    return dbPath;
   } catch (error) {
-    console.error('从S3读取数据库出错:', error.message);
+    console.error('Failed to load database from S3:', error.message);
+    return null;
+  }
+}
+
+// 辅助函数：连接到正确的数据库
+async function connectToDatabase(country) {
+  try {
+    const dbPath = await ensureDbFile(country);
+    if (!dbPath) return null;
+    return new sqlite3.Database(dbPath, sqlite3.OPEN_READONLY);
+  } catch (error) {
+    console.error('连接数据库失败:', error.message);
     return null;
   }
 }
@@ -701,43 +759,53 @@ app.get('/api/attractions-names-filtered/:country', async (req, res) => {
 // 获取指定国家全部景点的原始位置信息（用于地图）
 app.get('/api/attractions-positions/:country', async (req, res) => {
   const country = req.params.country;
-  try {
-  const db = await connectToDatabase(country);
-  if (!db) throw new Error('数据库连接失败');
-  const sql = `
-    SELECT a.id, a.name, a.region, a.county, a.rating, a.positive_reviews, a.position, a.image1
-    FROM attractions a
-    INNER JOIN (
-      SELECT name, region, MIN(id) AS min_id
-      FROM attractions
-      GROUP BY name, region
-    ) g ON a.name = g.name AND a.region = g.region AND a.id = g.min_id
-  `;
-  db.all(sql, [], (err, rows) => {
-    if (err) return res.status(500).json({ error: err.message });
-    const data = rows.map(r => ({
-      id: r.id,
-      name: r.name,
-      region: r.region,
-      county: r.county,
-      rating: r.rating,
-      positive_reviews: r.positive_reviews,
-      position: r.position,
-      hasImage: !!r.image1,
-    }));
-    res.json(data);
-    db.close();
-  });
-  } catch (error) {
-  res.status(500).json({ error: error.message });
-  }
-  });
+  const cacheKey = normalizeCountryKey(country);
+  const cached = getCacheEntry(POS_CACHE, cacheKey);
+  if (cached) return res.json(cached);
 
-  // 批量按 id 获取位置信息（收藏优化）
+  try {
+    const db = await connectToDatabase(country);
+    if (!db) throw new Error('数据库连接失败');
+    const sql = `
+      SELECT a.id, a.name, a.region, a.county, a.rating, a.positive_reviews, a.position, a.image1
+      FROM attractions a
+      INNER JOIN (
+        SELECT name, region, MIN(id) AS min_id
+        FROM attractions
+        GROUP BY name, region
+      ) g ON a.name = g.name AND a.region = g.region AND a.id = g.min_id
+    `;
+    db.all(sql, [], (err, rows) => {
+      if (err) return res.status(500).json({ error: err.message });
+      const data = rows.map(r => ({
+        id: r.id,
+        name: r.name,
+        region: r.region,
+        county: r.county,
+        rating: r.rating,
+        positive_reviews: r.positive_reviews,
+        position: r.position,
+        hasImage: !!r.image1,
+      }));
+      setCacheEntry(POS_CACHE, cacheKey, data);
+      res.json(data);
+      db.close();
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+// 批量按 id 获取位置信息（收藏优化）
   app.post('/api/attractions-positions/:country/by-ids', async (req, res) => {
   const country = req.params.country;
   const ids = Array.isArray(req.body.ids) ? req.body.ids : [];
   if (!ids.length) return res.json([]);
+  const cacheKey = normalizeCountryKey(country);
+  const cached = getCacheEntry(POS_CACHE, cacheKey);
+  if (cached && cached.length) {
+    const idSet = new Set(ids.map(id => String(id)));
+    return res.json(cached.filter(r => idSet.has(String(r.id))));
+  }
 
   try {
   const db = await connectToDatabase(country);
@@ -942,6 +1010,9 @@ app.get('/api/attraction/:country/:id', async (req, res) => {
 // 返回带经纬度的景点列表（仅返回有坐标的数据）
 app.get('/api/attractions-geo/:country', async (req, res) => {
   const country = req.params.country;
+  const cacheKey = normalizeCountryKey(country);
+  const cached = getCacheEntry(GEO_CACHE, cacheKey);
+  if (cached) return res.json(cached);
   try {
     const db = await connectToDatabase(country);
     if (!db) throw new Error('数据库连接失败');
@@ -975,6 +1046,7 @@ app.get('/api/attractions-geo/:country', async (req, res) => {
         hasImage: !!r.image1,
         country,
       }));
+      setCacheEntry(GEO_CACHE, cacheKey, data);
       res.json(data);
       db.close();
     });
@@ -988,6 +1060,12 @@ app.post('/api/attractions-geo/:country/by-ids', async (req, res) => {
   const country = req.params.country;
   const ids = Array.isArray(req.body.ids) ? req.body.ids : [];
   if (!ids.length) return res.json([]);
+  const cacheKey = normalizeCountryKey(country);
+  const cached = getCacheEntry(GEO_CACHE, cacheKey);
+  if (cached && cached.length) {
+    const idSet = new Set(ids.map(id => String(id)));
+    return res.json(cached.filter(r => idSet.has(String(r.id))));
+  }
 
   try {
     const db = await connectToDatabase(country);
