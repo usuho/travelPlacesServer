@@ -290,17 +290,20 @@ function resolveLocalDbPath(country) {
   return null;
 }
 
-async function ensureDbFile(country) {
+async function ensureDbFile(country, opts = {}) {
+  const { forceS3 = false } = opts;
   const key = normalizeCountryKey(country);
   if (!key) return null;
 
-  const cached = DB_CACHE.get(key);
-  if (cached && fs.existsSync(cached)) return cached;
+  if (!forceS3) {
+    const cached = DB_CACHE.get(key);
+    if (cached && fs.existsSync(cached)) return cached;
 
-  const local = resolveLocalDbPath(key);
-  if (local) {
-    DB_CACHE.set(key, local);
-    return local;
+    const local = resolveLocalDbPath(key);
+    if (local) {
+      DB_CACHE.set(key, local);
+      return local;
+    }
   }
 
   const params = {
@@ -322,9 +325,9 @@ async function ensureDbFile(country) {
 }
 
 // 辅助函数：连接到正确的数据库
-async function connectToDatabase(country) {
+async function connectToDatabase(country, opts = {}) {
   try {
-    const dbPath = await ensureDbFile(country);
+    const dbPath = await ensureDbFile(country, opts);
     if (!dbPath) return null;
     return new sqlite3.Database(dbPath, sqlite3.OPEN_READONLY);
   } catch (error) {
@@ -958,50 +961,75 @@ app.get('/api/attraction/:country/:id', async (req, res) => {
   const country = req.params.country;
   const id = req.params.id;
   try {
-    const db = await connectToDatabase(country);
-    // 兼容旧库：如果没有 lat/lng 列，则不在 SELECT 中包含
-    const cols = await getTableColumns(db, 'attractions');
-    const hasLatLng = cols.has('lat') && cols.has('lng');
-    const baseFields = 'id, image1, image2, image3, name, region, county, overview, duration, details, position';
-    const extra = hasLatLng ? ', lat, lng' : '';
-    const tail = ', total_reviews, rating, positive_reviews, website';
-    const sql = `SELECT ${baseFields}${extra}${tail} FROM attractions WHERE id = ?`;
-    db.get(sql, [id], async (err, row) => {
-      if (err) {
-        console.error('查询数据库出错: ' + err.message);
+    const fetchDetail = async (forceS3 = false) => {
+      const db = await connectToDatabase(country, { forceS3 });
+      if (!db) throw new Error('无法连接数据库');
+
+      const cols = await getTableColumns(db, 'attractions');
+      const hasLatLng = cols.has('lat') && cols.has('lng');
+      const baseFields = 'id, image1, image2, image3, name, region, county, overview, duration, details, position';
+      const extra = hasLatLng ? ', lat, lng' : '';
+      const tail = ', total_reviews, rating, positive_reviews, website';
+      const sql = `SELECT ${baseFields}${extra}${tail} FROM attractions WHERE id = ?`;
+
+      try {
+        const row = await new Promise((resolve, reject) => {
+          db.get(sql, [id], (err, r) => {
+            if (err) return reject(err);
+            resolve(r);
+          });
+        });
+        if (!row) return { row: null, hasLatLng };
+
+        row.hasImage1 = !!row.image1;
+        row.hasImage2 = !!row.image2;
+        row.hasImage3 = !!row.image3;
+
+        if (!hasLatLng) {
+          // 旧库没有坐标列，确保返回字段存在但为 null，避免前端断言失败
+          row.lat = null;
+          row.lng = null;
+        } else {
+          row.lat = typeof row.lat === 'string' ? parseFloat(row.lat) : row.lat;
+          row.lng = typeof row.lng === 'string' ? parseFloat(row.lng) : row.lng;
+        }
+        return { row, hasLatLng };
+      } finally {
+        db.close((err) => {
+          if (err) console.error(err.message);
+        });
+      }
+    };
+
+    let detail;
+    let lastError;
+    for (const forceS3 of [false, true]) {
+      try {
+        detail = await fetchDetail(forceS3);
+        const row = detail && detail.row;
+        const missingLatLng = !detail?.hasLatLng || !row || row.lat == null || row.lng == null;
+        if (missingLatLng && !forceS3) {
+          console.warn(`[geo] lat/lng missing for ${country}-${id}, retrying with S3`);
+          continue;
+        }
+        break;
+      } catch (err) {
+        lastError = err;
+        if (!forceS3) {
+          console.warn(`[geo] fetch detail failed for ${country}-${id}, retrying with S3:`, err.message);
+          continue;
+        }
         return res.status(500).json({ error: err.message });
       }
+    }
 
-      if (row.image1) {
-        row.hasImage1 = !!row.image1;
-      }
-      else row.hasImage1 = false;
+    if (!detail || !detail.row) {
+      const message = lastError ? lastError.message : '未找到景点';
+      return res.status(404).json({ error: message });
+    }
 
-      if (row.image2) {
-        row.hasImage2 = !!row.image2;
-      }
-      else row.hasImage2 = false;
-
-      if (row.image3) {
-        row.hasImage3 = !!row.image3;
-      }
-      else row.hasImage3 = false;
-
-      if (!hasLatLng) {
-        // 旧库没有坐标列，确保返回字段存在但为 null，避免前端断言失败
-        row.lat = null;
-        row.lng = null;
-      }
-      console.log('从数据库中获取的行:', row);
-
-      res.json(row);
-      db.close((err) => {
-        if (err) {
-          console.error(err.message);
-        }
-        console.log('关闭数据库连接.');
-      });
-    });
+    console.log('返回景点详情:', detail.row);
+    res.json(detail.row);
   } catch (error) {
     res.status(500).json({ error: '数据库连接失败' });
   }
@@ -1012,44 +1040,80 @@ app.get('/api/attractions-geo/:country', async (req, res) => {
   const country = req.params.country;
   const cacheKey = normalizeCountryKey(country);
   const cached = getCacheEntry(GEO_CACHE, cacheKey);
-  if (cached) return res.json(cached);
+  if (cached && cached.length) return res.json(cached);
   try {
-    const db = await connectToDatabase(country);
-    if (!db) throw new Error('数据库连接失败');
-    const cols = await getTableColumns(db, 'attractions');
-    const hasLatLng = cols.has('lat') && cols.has('lng');
-    if (!hasLatLng) { db.close(); return res.json([]); }
-    const sql = `
-      SELECT a.id, a.name, a.region, a.county, a.rating, a.positive_reviews, a.total_reviews,
-             a.lat, a.lng, a.image1
-      FROM attractions a
-      INNER JOIN (
-        SELECT name, region, MIN(id) AS min_id
-        FROM attractions
-        WHERE lat IS NOT NULL AND lng IS NOT NULL
-        GROUP BY name, region
-      ) g ON a.name = g.name AND a.region = g.region AND a.id = g.min_id
-      WHERE a.lat IS NOT NULL AND a.lng IS NOT NULL
-    `;
-    db.all(sql, [], (err, rows) => {
-      if (err) return res.status(500).json({ error: err.message });
-      const data = rows.map(r => ({
-        id: r.id,
-        name: r.name,
-        region: r.region,
-        county: r.county,
-        rating: r.rating,
-        positive_reviews: r.positive_reviews,
-        total_reviews: r.total_reviews,
-        lat: typeof r.lat === 'string' ? parseFloat(r.lat) : r.lat,
-        lng: typeof r.lng === 'string' ? parseFloat(r.lng) : r.lng,
-        hasImage: !!r.image1,
-        country,
-      }));
-      setCacheEntry(GEO_CACHE, cacheKey, data);
-      res.json(data);
-      db.close();
-    });
+    const fetchGeo = async (forceS3 = false) => {
+      const db = await connectToDatabase(country, { forceS3 });
+      if (!db) throw new Error('???????');
+      const cols = await getTableColumns(db, 'attractions');
+      const hasLatLng = cols.has('lat') && cols.has('lng');
+      if (!hasLatLng) { db.close(); return { rows: [], hasLatLng }; }
+      const sql = `
+        SELECT a.id, a.name, a.region, a.county, a.rating, a.positive_reviews, a.total_reviews,
+               a.lat, a.lng, a.image1
+        FROM attractions a
+        INNER JOIN (
+          SELECT name, region, MIN(id) AS min_id
+          FROM attractions
+          WHERE lat IS NOT NULL AND lng IS NOT NULL
+          GROUP BY name, region
+        ) g ON a.name = g.name AND a.region = g.region AND a.id = g.min_id
+        WHERE a.lat IS NOT NULL AND a.lng IS NOT NULL
+      `;
+      try {
+        const rows = await new Promise((resolve, reject) => {
+          db.all(sql, [], (err, r) => {
+            if (err) return reject(err);
+            resolve(r);
+          });
+        });
+        return { rows, hasLatLng };
+      } finally {
+        db.close();
+      }
+    };
+
+    let result;
+    let lastError;
+    for (const forceS3 of [false, true]) {
+      try {
+        result = await fetchGeo(forceS3);
+        const empty = !result?.rows || !result.rows.length || !result.hasLatLng;
+        if (empty && !forceS3) {
+          console.warn(`[geo] empty or missing lat/lng for ${country}, retrying with S3`);
+          continue;
+        }
+        break;
+      } catch (err) {
+        lastError = err;
+        if (!forceS3) {
+          console.warn(`[geo] fetch geo failed for ${country}, retrying with S3:`, err.message);
+          continue;
+        }
+        return res.status(500).json({ error: err.message });
+      }
+    }
+
+    if (!result) {
+      const message = lastError ? lastError.message : '?????????';
+      return res.status(500).json({ error: message });
+    }
+
+    const data = (result.rows || []).map(r => ({
+      id: r.id,
+      name: r.name,
+      region: r.region,
+      county: r.county,
+      rating: r.rating,
+      positive_reviews: r.positive_reviews,
+      total_reviews: r.total_reviews,
+      lat: typeof r.lat === 'string' ? parseFloat(r.lat) : r.lat,
+      lng: typeof r.lng === 'string' ? parseFloat(r.lng) : r.lng,
+      hasImage: !!r.image1,
+      country,
+    }));
+    setCacheEntry(GEO_CACHE, cacheKey, data);
+    res.json(data);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -1068,36 +1132,72 @@ app.post('/api/attractions-geo/:country/by-ids', async (req, res) => {
   }
 
   try {
-    const db = await connectToDatabase(country);
-    if (!db) throw new Error('数据库连接失败');
-    const cols = await getTableColumns(db, 'attractions');
-    const hasLatLng = cols.has('lat') && cols.has('lng');
-    if (!hasLatLng) { db.close(); return res.json([]); }
-    const placeholders = ids.map(() => '?').join(',');
-    const sql = `
-      SELECT id, name, region, county, rating, positive_reviews, total_reviews,
-             lat, lng, image1
-      FROM attractions
-      WHERE id IN (${placeholders}) AND lat IS NOT NULL AND lng IS NOT NULL
-    `;
-    db.all(sql, ids, (err, rows) => {
-      if (err) return res.status(500).json({ error: err.message });
-      const data = rows.map(r => ({
-        id: r.id,
-        name: r.name,
-        region: r.region,
-        county: r.county,
-        rating: r.rating,
-        positive_reviews: r.positive_reviews,
-        total_reviews: r.total_reviews,
-        lat: typeof r.lat === 'string' ? parseFloat(r.lat) : r.lat,
-        lng: typeof r.lng === 'string' ? parseFloat(r.lng) : r.lng,
-        hasImage: !!r.image1,
-        country,
-      }));
-      res.json(data);
-      db.close();
-    });
+    const fetchGeoByIds = async (forceS3 = false) => {
+      const db = await connectToDatabase(country, { forceS3 });
+      if (!db) throw new Error('???????');
+      const cols = await getTableColumns(db, 'attractions');
+      const hasLatLng = cols.has('lat') && cols.has('lng');
+      if (!hasLatLng) { db.close(); return { rows: [], hasLatLng }; }
+      const placeholders = ids.map(() => '?').join(',');
+      const sql = `
+        SELECT id, name, region, county, rating, positive_reviews, total_reviews,
+               lat, lng, image1
+        FROM attractions
+        WHERE id IN (${placeholders}) AND lat IS NOT NULL AND lng IS NOT NULL
+      `;
+      try {
+        const rows = await new Promise((resolve, reject) => {
+          db.all(sql, ids, (err, r) => {
+            if (err) return reject(err);
+            resolve(r);
+          });
+        });
+        return { rows, hasLatLng };
+      } finally {
+        db.close();
+      }
+    };
+
+    let result;
+    let lastError;
+    for (const forceS3 of [false, true]) {
+      try {
+        result = await fetchGeoByIds(forceS3);
+        const empty = !result?.rows || !result.rows.length || !result.hasLatLng;
+        if (empty && !forceS3) {
+          console.warn(`[geo] empty/missing lat/lng for ids ${ids.join(',')}, retrying with S3`);
+          continue;
+        }
+        break;
+      } catch (err) {
+        lastError = err;
+        if (!forceS3) {
+          console.warn(`[geo] fetch geo by ids failed for ${country}, retrying with S3:`, err.message);
+          continue;
+        }
+        return res.status(500).json({ error: err.message });
+      }
+    }
+
+    if (!result) {
+      const message = lastError ? lastError.message : '?????????';
+      return res.status(500).json({ error: message });
+    }
+
+    const data = (result.rows || []).map(r => ({
+      id: r.id,
+      name: r.name,
+      region: r.region,
+      county: r.county,
+      rating: r.rating,
+      positive_reviews: r.positive_reviews,
+      total_reviews: r.total_reviews,
+      lat: typeof r.lat === 'string' ? parseFloat(r.lat) : r.lat,
+      lng: typeof r.lng === 'string' ? parseFloat(r.lng) : r.lng,
+      hasImage: !!r.image1,
+      country,
+    }));
+    res.json(data);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
