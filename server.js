@@ -29,6 +29,7 @@ const DB_CACHE = new Map();           // country -> resolved db path
 const GEO_CACHE = new Map();          // country -> { ts, data }
 const POS_CACHE = new Map();          // country -> { ts, data }
 const GEO_CACHE_TTL_MS = parseInt(process.env.GEO_CACHE_TTL_MS || `${5 * 60 * 1000}`, 10); // default 5 minutes
+const BOOT_TIME_MS = Date.now();      // 用于减少频繁 HEAD：仅当本地文件早于启动时间才去 HEAD
 
 // 启动时打印一下邀请码环境变量是否存在，便于排查部署问题（不打印具体值）
 try {
@@ -295,31 +296,60 @@ async function ensureDbFile(country, opts = {}) {
   const key = normalizeCountryKey(country);
   if (!key) return null;
 
-  if (!forceS3) {
-    const cached = DB_CACHE.get(key);
-    if (cached && fs.existsSync(cached)) return cached;
+  // 先定位本地候选路径
+  let localPath = DB_CACHE.get(key);
+  if (!localPath) localPath = resolveLocalDbPath(key);
 
-    const local = resolveLocalDbPath(key);
-    if (local) {
-      DB_CACHE.set(key, local);
-      return local;
+  let localStat = null;
+  if (localPath && fs.existsSync(localPath)) {
+    try { localStat = fs.statSync(localPath); } catch (_) { localStat = null; }
+  } else {
+    localPath = null;
+  }
+
+  // 仅当本地文件早于启动时间、或强制刷新时才去 HEAD，降低每次请求开销
+  const params = { Bucket: DATA_BUCKET, Key: `${key}.db` };
+  let remoteLastModified = null;
+  const needHead = forceS3 || !localPath || !localStat || (localStat.mtime.getTime() < BOOT_TIME_MS);
+  if (needHead) {
+    try {
+      const head = await s3.headObject(params).promise();
+      if (head && head.LastModified) remoteLastModified = new Date(head.LastModified).getTime();
+    } catch (err) {
+      // 若找不到文件，记录后续按本地处理；其他错误仅告警
+      if (!(err && (err.code === 'NotFound' || err.code === 'NoSuchKey' || err.statusCode === 404))) {
+        console.warn(`[db] headObject failed for ${key}.db:`, err.message || err);
+      }
     }
   }
 
-  const params = {
-    Bucket: DATA_BUCKET,
-    Key: `${key}.db`,
-  };
+  const localIsFresh = !forceS3
+    && localPath
+    && localStat
+    && (!needHead || remoteLastModified === null || localStat.mtime.getTime() >= remoteLastModified);
 
+  if (localIsFresh) {
+    DB_CACHE.set(key, localPath);
+    return localPath;
+  }
+
+  // 需要从 S3 拉取（版本更新或缺失/强制）
   try {
     const data = await s3.getObject(params).promise();
     if (!data.Body) throw new Error('S3 getObject response does not contain Body');
     const dbPath = path.join(__dirname, `${key}.db`);
     fs.writeFileSync(dbPath, data.Body);
+    // 将本地文件时间对齐远端，便于下次比对
+    if (remoteLastModified) {
+      const d = new Date(remoteLastModified);
+      try { fs.utimesSync(dbPath, d, d); } catch (_) {}
+    }
     DB_CACHE.set(key, dbPath);
     return dbPath;
   } catch (error) {
     console.error('Failed to load database from S3:', error.message);
+    // 若拉取失败但本地有旧文件，作为降级返回
+    if (localPath && localStat) return localPath;
     return null;
   }
 }
